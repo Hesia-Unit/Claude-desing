@@ -1,4 +1,5 @@
 #include "policy.hpp"
+#include "policy_ed25519_public_key.h"
 
 #include <algorithm>
 #include <cctype>
@@ -66,9 +67,20 @@ static std::vector<uint8_t> base64_decode(const std::string& b64) {
         if (!std::isspace(static_cast<unsigned char>(c))) compact.push_back(c);
     }
     if (compact.empty()) return {};
+    if ((compact.size() % 4) != 0) {
+        throw std::runtime_error("Base64 decode failed: length not multiple of 4");
+    }
+
+    size_t padding = 0;
+    if (!compact.empty() && compact.back() == '=') {
+        padding++;
+        if (compact.size() >= 2 && compact[compact.size() - 2] == '=') {
+            padding++;
+        }
+    }
 
     const int len = static_cast<int>(compact.size());
-    const int out_len = (len * 3) / 4 + 4;
+    const int out_len = (len * 3) / 4;
     std::vector<uint8_t> out(static_cast<size_t>(out_len));
     int n = EVP_DecodeBlock(out.data(),
                             reinterpret_cast<const unsigned char*>(compact.data()),
@@ -76,25 +88,31 @@ static std::vector<uint8_t> base64_decode(const std::string& b64) {
     if (n < 0) {
         throw std::runtime_error("Base64 decode failed");
     }
-    // Trim possible padding
-    while (!out.empty() && out.back() == 0) {
-        out.pop_back();
+    if (padding > 2 || n < static_cast<int>(padding)) {
+        throw std::runtime_error("Base64 decode failed: invalid padding");
     }
+    n -= static_cast<int>(padding);
+    out.resize(static_cast<size_t>(n));
     return out;
 }
 
 static bool verify_ed25519_signature(const std::vector<uint8_t>& data,
                                      const std::vector<uint8_t>& sig,
-                                     const std::string& pubkey_path) {
-    if (sig.empty()) return false;
-    FILE* fp = fopen(pubkey_path.c_str(), "rb");
-    if (!fp) {
-        throw std::runtime_error("Cannot open policy public key: " + pubkey_path);
+                                     const std::string& pubkey_pem) {
+    if (sig.size() != 64) return false;
+    BIO* bio = BIO_new_mem_buf(pubkey_pem.data(),
+                               static_cast<int>(pubkey_pem.size()));
+    if (!bio) {
+        throw std::runtime_error("BIO_new_mem_buf failed");
     }
-    EVP_PKEY* pkey = PEM_read_PUBKEY(fp, nullptr, nullptr, nullptr);
-    fclose(fp);
+    EVP_PKEY* pkey = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
+    BIO_free(bio);
     if (!pkey) {
-        throw std::runtime_error("Failed to read policy public key: " + pubkey_path);
+        throw std::runtime_error("Failed to read embedded policy public key");
+    }
+    if (EVP_PKEY_base_id(pkey) != EVP_PKEY_ED25519) {
+        EVP_PKEY_free(pkey);
+        throw std::runtime_error("Embedded policy public key is not Ed25519");
     }
 
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
@@ -116,6 +134,14 @@ static bool verify_ed25519_signature(const std::vector<uint8_t>& data,
     EVP_MD_CTX_free(ctx);
     EVP_PKEY_free(pkey);
     return ok == 1;
+}
+
+static std::string get_embedded_policy_ed25519_pubkey_pem() {
+    if (kPolicyEd25519PublicKeyPemLen == 0) {
+        throw std::runtime_error("Embedded policy Ed25519 public key is empty");
+    }
+    return std::string(reinterpret_cast<const char*>(kPolicyEd25519PublicKeyPem),
+                       kPolicyEd25519PublicKeyPemLen);
 }
 
 static std::unordered_map<std::string, std::string> parse_kv(const std::string& content) {
@@ -205,8 +231,7 @@ SecurityPolicy load_security_policy_or_throw(const std::string& role) {
     p.policy_pubkey_path = (std::filesystem::path(p.policy_dir) / "policy_pub.pem").string();
 
     if (!std::filesystem::exists(p.policy_path) ||
-        !std::filesystem::exists(p.policy_sig_path) ||
-        !std::filesystem::exists(p.policy_pubkey_path)) {
+        !std::filesystem::exists(p.policy_sig_path)) {
         throw std::runtime_error("Security policy files missing in " + p.policy_dir);
     }
 
@@ -215,7 +240,8 @@ SecurityPolicy load_security_policy_or_throw(const std::string& role) {
     std::vector<uint8_t> sig = base64_decode(sig_text);
     std::vector<uint8_t> data(policy_text.begin(), policy_text.end());
 
-    if (!verify_ed25519_signature(data, sig, p.policy_pubkey_path)) {
+    const std::string ed25519_pub_pem = get_embedded_policy_ed25519_pubkey_pem();
+    if (!verify_ed25519_signature(data, sig, ed25519_pub_pem)) {
         throw std::runtime_error("Security policy signature invalid");
     }
 

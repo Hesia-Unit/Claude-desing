@@ -1,0 +1,16 @@
+# Secrets and PKI state
+server_source/keys/*.key
+server_source/keys/demo_secret.bin
+server_source/keys/demo_secret.pem
+server_source/keys/*.srl
+drone_transition_source/allowlist_priv.pem
+
+# Build outputs and local runtime artifacts
+**/build/
+**/out/
+**/.vs/
+**/.venv/
+**/__pycache__/
+**/frame_logs/
+**/decrypted_frames/
+**/*.tmp

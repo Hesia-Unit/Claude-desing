@@ -101,6 +101,15 @@ static bool read_file_double(const std::filesystem::path& path, double& out) {
     return true;
 }
 
+static std::vector<uint8_t> read_file_binary_strict(const std::filesystem::path& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) {
+        throw std::runtime_error("Impossible d'ouvrir le fichier: " + path.string());
+    }
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)),
+                                 std::istreambuf_iterator<char>());
+}
+
 static double read_cpu_temp_max_c() {
     const std::filesystem::path base("/sys/devices/virtual/thermal");
     if (!std::filesystem::exists(base)) return -1.0;
@@ -401,8 +410,24 @@ bool DroneNetworkClient::connect(const std::string& host, int port, int timeout,
 
                 // Optional SPKI pinning (policy-controlled)
                 if (tls_pin_server_pubkey) {
-                    std::vector<uint8_t> pin(demo_public_bin, demo_public_bin + demo_public_bin_len);
-                    tls->enable_spki_pinning(pin);
+                    const std::vector<std::filesystem::path> pin_candidates = {
+                        std::filesystem::path(resolve_path(policy_.secure_dir, "server_tls_spki.pem")),
+                        std::filesystem::path(resolve_path(policy_.secure_dir, "server_tls_spki.der")),
+                        std::filesystem::path(resolve_path(policy_.cert_dir, "server.crt")),
+                    };
+                    bool pin_loaded = false;
+                    for (const auto& candidate : pin_candidates) {
+                        if (!std::filesystem::exists(candidate)) {
+                            continue;
+                        }
+                        tls->enable_spki_pinning(read_file_binary_strict(candidate));
+                        logger->info("TLS SPKI pin loaded from " + candidate.string());
+                        pin_loaded = true;
+                        break;
+                    }
+                    if (!pin_loaded) {
+                        throw SecurityViolation("tls_pin active mais aucun certificat/SPKI serveur epingle n'a ete provisionne");
+                    }
                 }
 
                 tls->set_timeouts(policy_.ssl_read_timeout_sec * 1000, policy_.ssl_write_timeout_sec * 1000);

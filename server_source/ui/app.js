@@ -18,6 +18,38 @@ let framePending = false;
 let pendingUrl = '';
 let frameFailures = 0;
 
+function renderLogLines(lines) {
+  const fragment = document.createDocumentFragment();
+  lines.forEach(line => {
+    const div = document.createElement('div');
+    div.className = `log-line ${classifyLog(line)}`;
+    div.textContent = line;
+    fragment.appendChild(div);
+  });
+  logView.replaceChildren(fragment);
+  logView.scrollTop = logView.scrollHeight;
+}
+
+function createFileItem(name, meta, type, onClick) {
+  const div = document.createElement('div');
+  div.className = `file-item ${type}`;
+
+  const nameEl = document.createElement('div');
+  nameEl.className = 'name';
+  nameEl.textContent = name;
+  div.appendChild(nameEl);
+
+  const metaEl = document.createElement('div');
+  metaEl.className = 'meta';
+  metaEl.textContent = typeof meta === 'string' ? meta : '';
+  div.appendChild(metaEl);
+
+  if (onClick) {
+    div.addEventListener('click', onClick);
+  }
+  return div;
+}
+
 function setGauge(gauge, value, max, unit) {
   const needle = gauge.querySelector('.gauge-needle');
   const valueEl = gauge.querySelector('.gauge-value');
@@ -76,11 +108,7 @@ async function fetchLogs() {
     if (!res.ok) return;
     const data = await res.json();
     const lines = data.lines || [];
-    logView.innerHTML = lines.map(l => {
-      const cls = classifyLog(l);
-      return `<div class="log-line ${cls}">${l}</div>`;
-    }).join('');
-    logView.scrollTop = logView.scrollHeight;
+    renderLogLines(lines);
   } catch (_) {
     // ignore
   }
@@ -167,21 +195,18 @@ async function fetchTree(path = '') {
     if (!res.ok) return;
     const data = await res.json();
     filePath.textContent = data.path || '/';
-    fileTree.innerHTML = '';
+    fileTree.replaceChildren();
     if (data.parent) {
-      const up = document.createElement('div');
-      up.className = 'file-item dir';
-      up.innerHTML = `<div class="name">..</div><div class="meta">parent</div>`;
-      up.addEventListener('click', () => fetchTree(data.parent));
+      const up = createFileItem('..', 'parent', 'dir', () => fetchTree(data.parent));
       fileTree.appendChild(up);
     }
     (data.items || []).forEach(item => {
-      const div = document.createElement('div');
-      div.className = `file-item ${item.type}`;
-      div.innerHTML = `<div class="name">${item.name}</div><div class="meta">${item.meta || ''}</div>`;
-      if (item.type === 'dir') {
-        div.addEventListener('click', () => fetchTree(item.path));
-      }
+      const div = createFileItem(
+        item.name,
+        item.meta || '',
+        item.type,
+        item.type === 'dir' ? () => fetchTree(item.path) : null
+      );
       fileTree.appendChild(div);
     });
   } catch (_) {

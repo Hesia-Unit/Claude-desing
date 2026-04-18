@@ -27,6 +27,34 @@
 
 namespace hesia {
 
+static bool env_flag_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value || !*value) {
+        return false;
+    }
+    std::string normalized(value);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+}
+
+static std::string sanitize_path_component(const std::string& input) {
+    std::string out;
+    out.reserve(input.size());
+    for (unsigned char c : input) {
+        if (std::isalnum(c) || c == '.' || c == '_' || c == '-') {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('_');
+        }
+    }
+    if (out.empty()) {
+        out = "client";
+    }
+    return out;
+}
+
 static uint64_t now_ms() {
     return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -41,6 +69,9 @@ static void save_decrypted_frame(const std::vector<uint8_t>& frame_data,
                                  const std::string& client_id,
                                  const std::filesystem::path& base_dir) {
     try {
+        if (base_dir.empty()) {
+            return;
+        }
         // Creer le dossier forensic s'il n'existe pas
         std::filesystem::path frames_dir = base_dir;
         if (!std::filesystem::exists(frames_dir)) {
@@ -48,7 +79,7 @@ static void save_decrypted_frame(const std::vector<uint8_t>& frame_data,
         }
 
         // Creer un sous-dossier pour ce client
-        std::filesystem::path client_dir = frames_dir / client_id;
+        std::filesystem::path client_dir = frames_dir / sanitize_path_component(client_id);
         if (!std::filesystem::exists(client_dir)) {
             std::filesystem::create_directories(client_dir);
         }
@@ -348,19 +379,49 @@ void HesiaServerSession::run() {
 }
 
 void HesiaServerSession::load_server_keys() {
-    // Use binary keys (aligned with Python server keys/ directory):
-    // - demo_secret.bin (ML-DSA-87 secret key)
-    // - demo_public.bin (ML-DSA-87 public key)
-    auto read_bin = [](const std::string& path) -> std::vector<uint8_t> {
+    auto read_bin = [](const std::filesystem::path& path) -> std::vector<uint8_t> {
         std::ifstream f(path, std::ios::binary);
-        if (!f) throw std::runtime_error("Cannot open key file: " + path);
+        if (!f) throw std::runtime_error("Cannot open key file: " + path.string());
         std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-        if (buf.empty()) throw std::runtime_error("Empty key file: " + path);
+        if (buf.empty()) throw std::runtime_error("Empty key file: " + path.string());
         return buf;
     };
 
-    server_sk_ = read_bin(keys_dir_ + "/demo_secret.bin");
-    server_pk_ = read_bin(keys_dir_ + "/demo_public.bin");
+    struct KeyPairCandidate {
+        const char* secret_name;
+        const char* public_name;
+        bool demo;
+    };
+    const std::vector<KeyPairCandidate> candidates = {
+        {"server_secret.bin", "server_public.bin", false},
+        {"mldsa87_secret.bin", "mldsa87_public.bin", false},
+        {"demo_secret.bin", "demo_public.bin", true},
+    };
+
+    std::filesystem::path selected_secret;
+    std::filesystem::path selected_public;
+    bool using_demo_pair = false;
+    for (const auto& candidate : candidates) {
+        const std::filesystem::path secret_path = std::filesystem::path(keys_dir_) / candidate.secret_name;
+        const std::filesystem::path public_path = std::filesystem::path(keys_dir_) / candidate.public_name;
+        if (std::filesystem::exists(secret_path) && std::filesystem::exists(public_path)) {
+            selected_secret = secret_path;
+            selected_public = public_path;
+            using_demo_pair = candidate.demo;
+            break;
+        }
+    }
+
+    if (selected_secret.empty() || selected_public.empty()) {
+        throw std::runtime_error("Missing server ML-DSA keypair in keys dir. "
+                                 "Expected server_secret.bin/server_public.bin or mldsa87_* files.");
+    }
+    if (policy_.prod_fuse && using_demo_pair) {
+        throw std::runtime_error("Refusing demo ML-DSA server keys in production mode");
+    }
+
+    server_sk_ = read_bin(selected_secret);
+    server_pk_ = read_bin(selected_public);
 
     log_->info("Server ML-DSA keys loaded (pk=" + std::to_string(server_pk_.size()) +
                "B, sk=" + std::to_string(server_sk_.size()) + "B)");
@@ -397,7 +458,7 @@ void HesiaServerSession::load_drone_pubkey() {
         }
     }
 
-    require_pinned_drone_key_ = policy_.require_pinned_drone_pubkey || !path.empty();
+    require_pinned_drone_key_ = policy_.prod_fuse || policy_.require_pinned_drone_pubkey || !path.empty();
 
     if (!path.empty()) {
         expected_drone_pubkey_ = read_bin(path);
@@ -864,7 +925,9 @@ void HesiaServerSession::secure_loop() {
                 std::vector<uint8_t> pt = secure_channel_->decrypt(iv, ct, tag, last_block_hash_);
                 
                 // Sauvegarder le message déchiffré pour analyse
-                save_decrypted_frame(pt, 0, client_label_ + "_secure_msg", policy_.forensic_dir);
+                if (env_flag_enabled("HESIA_FORENSIC_MESSAGE_CAPTURE")) {
+                    save_decrypted_frame(pt, 0, client_label_ + "_secure_msg", policy_.forensic_dir);
+                }
                 
                 // Update chaining: SHA3-512(last_block_hash || plaintext)
                 std::vector<uint8_t> chain;
@@ -900,7 +963,9 @@ void HesiaServerSession::secure_loop() {
                 }
                 
                 // Sauvegarder la frame dechiffree pour analyse
-                save_decrypted_frame(frame, pkt.frame_id, client_label_, policy_.forensic_dir);
+                if (env_flag_enabled("HESIA_FORENSIC_VIDEO_CAPTURE")) {
+                    save_decrypted_frame(frame, pkt.frame_id, client_label_, policy_.forensic_dir);
+                }
                 if (!ui_dir.empty()) {
                     write_binary_atomic(ui_dir / "latest.jpg", frame);
                     std::ostringstream meta;

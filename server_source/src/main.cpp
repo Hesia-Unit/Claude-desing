@@ -82,8 +82,23 @@ static std::vector<uint8_t> base64_decode(const std::vector<uint8_t>& data) {
         if (c == '\n' || c == '\r' || c == '\t' || c == ' ') continue;
         compact.push_back(static_cast<char>(c));
     }
+    if (compact.empty()) {
+        return {};
+    }
+    if ((compact.size() % 4) != 0) {
+        throw std::runtime_error("Base64 decode failed: length not multiple of 4");
+    }
+
+    size_t padding = 0;
+    if (!compact.empty() && compact.back() == '=') {
+        padding++;
+        if (compact.size() >= 2 && compact[compact.size() - 2] == '=') {
+            padding++;
+        }
+    }
+
     const int len = static_cast<int>(compact.size());
-    const int out_len = (len * 3) / 4 + 4;
+    const int out_len = (len * 3) / 4;
     std::vector<uint8_t> out(static_cast<size_t>(out_len));
     int n = EVP_DecodeBlock(out.data(),
                             reinterpret_cast<const unsigned char*>(compact.data()),
@@ -91,9 +106,11 @@ static std::vector<uint8_t> base64_decode(const std::vector<uint8_t>& data) {
     if (n < 0) {
         throw std::runtime_error("Base64 decode failed");
     }
-    while (!out.empty() && out.back() == 0) {
-        out.pop_back();
+    if (padding > 2 || n < static_cast<int>(padding)) {
+        throw std::runtime_error("Base64 decode failed: invalid padding");
     }
+    n -= static_cast<int>(padding);
+    out.resize(static_cast<size_t>(n));
     return out;
 }
 
@@ -176,8 +193,7 @@ static int create_listen_socket(const std::string& bind_addr, int port) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(port));
     if (inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr) != 1) {
-        // fallback: 0.0.0.0
-        addr.sin_addr.s_addr = INADDR_ANY;
+        return -1;
     }
 
     if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
@@ -420,7 +436,8 @@ int main() {
                 continue;
             }
 
-            if (!SSL_get_peer_certificate(ssl)) {
+            X509* peer_cert = SSL_get_peer_certificate(ssl);
+            if (!peer_cert) {
                 sess_logger->error("mTLS required: client certificate missing");
                 SSL_shutdown(ssl);
                 SSL_free(ssl);
@@ -432,6 +449,7 @@ int main() {
                 limiter.release(conn.ip);
                 continue;
             }
+            X509_free(peer_cert);
 
             try {
                 HesiaServerSession session(ssl, client_label, keys_dir, sess_logger, audit, policy);

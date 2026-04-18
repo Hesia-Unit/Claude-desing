@@ -11,7 +11,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 UI_DIR = Path(os.environ.get("HESIA_UI_STATIC", BASE_DIR / "ui"))
 DATA_DIR = Path(os.environ.get("HESIA_UI_DATA_DIR", "/var/log/hesia/ui"))
 LOG_FILE = Path(os.environ.get("HESIA_LOG_FILE", "/var/log/hesia/HESIA-SERVER-CPP.log"))
-TREE_ROOT = Path(os.environ.get("HESIA_UI_TREE_ROOT", "/var/log/hesia"))
+BIND_ADDR = os.environ.get("HESIA_UI_BIND_ADDR", "127.0.0.1")
+ALLOW_REMOTE = os.environ.get("HESIA_UI_ALLOW_REMOTE", "0") == "1"
+TREE_ROOT = Path(os.environ.get("HESIA_UI_TREE_ROOT", str(DATA_DIR)))
 PORT = int(os.environ.get("HESIA_UI_PORT", "8080"))
 
 
@@ -33,18 +35,28 @@ def tail_lines(path: Path, n: int = 200, max_bytes: int = 1_000_000):
 
 def safe_join(root: Path, user_path: str) -> Optional[Path]:
     try:
+        resolved_root = root.resolve()
         rel = user_path.lstrip("/")
-        target = (root / rel).resolve()
-        if str(target).startswith(str(root.resolve())):
-            return target
+        target = (resolved_root / rel).resolve()
+        target.relative_to(resolved_root)
+        return target
     except Exception:
         return None
-    return None
+
+
+def is_loopback_bind(host: str) -> bool:
+    normalized = host.strip().lower()
+    return normalized in {"127.0.0.1", "::1", "localhost"}
 
 
 class UIHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
+
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
 
     def _send_json(self, obj, code=200):
         payload = json.dumps(obj).encode("utf-8")
@@ -99,7 +111,11 @@ class UIHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/logs":
             qs = parse_qs(parsed.query)
-            lines = int(qs.get("lines", ["200"])[0])
+            try:
+                lines = int(qs.get("lines", ["200"])[0])
+            except Exception:
+                lines = 200
+            lines = max(1, min(lines, 1000))
             data = {
                 "ts": int(time.time() * 1000),
                 "lines": tail_lines(LOG_FILE, n=lines),
@@ -151,8 +167,10 @@ class UIHandler(SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     UI_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), UIHandler)
-    print(f"[UI] Serving {UI_DIR} on http://0.0.0.0:{PORT}")
+    if not is_loopback_bind(BIND_ADDR) and not ALLOW_REMOTE:
+        raise SystemExit("Refusing remote UI bind without HESIA_UI_ALLOW_REMOTE=1")
+    server = ThreadingHTTPServer((BIND_ADDR, PORT), UIHandler)
+    print(f"[UI] Serving {UI_DIR} on http://{BIND_ADDR}:{PORT}")
     print(f"[UI] Data dir: {DATA_DIR}")
     print(f"[UI] Log file: {LOG_FILE}")
     print(f"[UI] Tree root: {TREE_ROOT}")

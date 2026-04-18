@@ -81,8 +81,21 @@ static std::vector<uint8_t> base64_decode(const std::vector<uint8_t>& data) {
         if (c == '\n' || c == '\r' || c == '\t' || c == ' ') continue;
         compact.push_back(static_cast<char>(c));
     }
+    if (compact.empty()) return {};
+    if ((compact.size() % 4) != 0) {
+        throw std::runtime_error("Base64 decode failed: length not multiple of 4");
+    }
+
+    size_t padding = 0;
+    if (!compact.empty() && compact.back() == '=') {
+        padding++;
+        if (compact.size() >= 2 && compact[compact.size() - 2] == '=') {
+            padding++;
+        }
+    }
+
     const int len = static_cast<int>(compact.size());
-    const int out_len = (len * 3) / 4 + 4;
+    const int out_len = (len * 3) / 4;
     std::vector<uint8_t> out(static_cast<size_t>(out_len));
     int n = EVP_DecodeBlock(out.data(),
                             reinterpret_cast<const unsigned char*>(compact.data()),
@@ -90,9 +103,11 @@ static std::vector<uint8_t> base64_decode(const std::vector<uint8_t>& data) {
     if (n < 0) {
         throw std::runtime_error("Base64 decode failed");
     }
-    while (!out.empty() && out.back() == 0) {
-        out.pop_back();
+    if (padding > 2 || n < static_cast<int>(padding)) {
+        throw std::runtime_error("Base64 decode failed: invalid padding");
     }
+    n -= static_cast<int>(padding);
+    out.resize(static_cast<size_t>(n));
     return out;
 }
 
@@ -327,6 +342,23 @@ static void write_public_key(const std::filesystem::path& path, const std::vecto
     }
 }
 
+static std::vector<uint8_t> load_pinned_server_pubkey_or_throw(const SecurityPolicy& policy)
+{
+    const std::filesystem::path secure_dir(policy.secure_dir);
+    const std::vector<std::filesystem::path> candidates = {
+        secure_dir / "server_public.bin",
+        secure_dir / "server_mldsa87_public.bin",
+    };
+
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::exists(candidate)) {
+            return read_file_binary(candidate);
+        }
+    }
+
+    throw SecurityViolation("Pinned server ML-DSA public key missing in secure_dir");
+}
+
 
 HesiaDrone::HesiaDrone(const std::string& did) 
     : state(DroneState::IDLE), drone_id(did), seq(0) {
@@ -352,8 +384,15 @@ HesiaDrone::HesiaDrone(const std::string& did)
     }
     
     // ✅ Utiliser la clé publique du serveur intégrée pour vérifier les signatures du serveur
-    server_pubkey.resize(demo_public_bin_len);
-    std::copy(demo_public_bin, demo_public_bin + demo_public_bin_len, server_pubkey.begin());
+    try {
+        server_pubkey = load_pinned_server_pubkey_or_throw(policy_);
+    } catch (const std::exception&) {
+        if (policy_.prod_fuse) {
+            throw;
+        }
+        server_pubkey.resize(demo_public_bin_len);
+        std::copy(demo_public_bin, demo_public_bin + demo_public_bin_len, server_pubkey.begin());
+    }
     
     // Charger la clé privée Dilithium (ancrée via OP-TEE) ou générer/sceller si absente
     const bool allow_ephemeral_dilithium = policy_.allow_ephemeral_dilithium;
@@ -745,6 +784,22 @@ void HesiaDrone::handle_key_confirm(const KeyConfirm& kc, const std::vector<uint
     signed_payload.insert(signed_payload.end(), session_id.begin(), session_id.end());
     signed_payload.insert(signed_payload.end(), expected_transcript_hash.begin(), expected_transcript_hash.end());
 
+    if (kc.timestamp == 0) {
+        if (policy_.prod_fuse) {
+            throw SecurityViolation("KEY_CONFIRM: timestamp missing in production mode");
+        }
+    } else {
+        const uint64_t current_time = get_current_timestamp_ms();
+        constexpr uint64_t kMaxFutureSkewMs = 30ULL * 1000ULL;
+        constexpr uint64_t kMaxAgeMs = 5ULL * 60ULL * 1000ULL;
+        if (kc.timestamp > current_time + kMaxFutureSkewMs) {
+            throw SecurityViolation("KEY_CONFIRM: timestamp in the future");
+        }
+        if (current_time >= kc.timestamp && (current_time - kc.timestamp) > kMaxAgeMs) {
+            throw SecurityViolation("KEY_CONFIRM: timestamp too old");
+        }
+    }
+
     auto append_u64_be = [&](uint64_t v) {
         for (int i = 7; i >= 0; --i) {
             signed_payload.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFF));
@@ -760,7 +815,7 @@ void HesiaDrone::handle_key_confirm(const KeyConfirm& kc, const std::vector<uint
     }
 
     // Compat: certains serveurs peuvent signer sans timestamp
-    if (!ok) {
+    if (!ok && !policy_.prod_fuse) {
         signed_payload.resize(0);
         signed_payload.reserve(session_id.size() + 64);
         signed_payload.insert(signed_payload.end(), session_id.begin(), session_id.end());

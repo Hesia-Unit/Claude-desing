@@ -12,6 +12,7 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #include <openssl/evp.h>
+#include <openssl/pem.h>
 #include <openssl/sha.h>
 
 #ifdef _WIN32
@@ -102,6 +103,64 @@ static void require_file_exists(const std::string& path) {
     }
 }
 
+static std::vector<uint8_t> extract_spki_der_from_material(const std::vector<uint8_t>& material) {
+    if (material.empty()) {
+        return {};
+    }
+
+    EVP_PKEY* pkey = nullptr;
+    BIO* bio = BIO_new_mem_buf(material.data(), static_cast<int>(material.size()));
+    if (bio) {
+        X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+        if (cert) {
+            pkey = X509_get_pubkey(cert);
+            X509_free(cert);
+        }
+        if (!pkey) {
+            BIO_free(bio);
+            bio = BIO_new_mem_buf(material.data(), static_cast<int>(material.size()));
+            if (bio) {
+                pkey = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
+            }
+        }
+    }
+    if (bio) {
+        BIO_free(bio);
+    }
+
+    if (!pkey) {
+        const unsigned char* ptr = material.data();
+        X509* cert = d2i_X509(nullptr, &ptr, static_cast<long>(material.size()));
+        if (cert) {
+            pkey = X509_get_pubkey(cert);
+            X509_free(cert);
+        }
+    }
+
+    if (!pkey) {
+        const unsigned char* ptr = material.data();
+        pkey = d2i_PUBKEY(nullptr, &ptr, static_cast<long>(material.size()));
+    }
+
+    if (!pkey) {
+        return {};
+    }
+
+    const int len = i2d_PUBKEY(pkey, nullptr);
+    if (len <= 0) {
+        EVP_PKEY_free(pkey);
+        return {};
+    }
+    std::vector<uint8_t> spki(static_cast<size_t>(len));
+    unsigned char* out = spki.data();
+    if (i2d_PUBKEY(pkey, &out) != len) {
+        EVP_PKEY_free(pkey);
+        return {};
+    }
+    EVP_PKEY_free(pkey);
+    return spki;
+}
+
 TLSChannel::TLSChannel() {
     // OpenSSL 1.1.0+ auto-initializes; still safe to call.
     SSL_library_init();
@@ -166,7 +225,12 @@ void TLSChannel::enable_spki_pinning(const std::vector<uint8_t>& pin_or_bytes) {
     if (pin_or_bytes.size() == SHA256_DIGEST_LENGTH) {
         spki_sha256_pin_ = pin_or_bytes;
     } else {
-        spki_sha256_pin_ = sha256(pin_or_bytes.data(), pin_or_bytes.size());
+        const std::vector<uint8_t> spki = extract_spki_der_from_material(pin_or_bytes);
+        if (!spki.empty()) {
+            spki_sha256_pin_ = sha256(spki.data(), spki.size());
+        } else {
+            spki_sha256_pin_ = sha256(pin_or_bytes.data(), pin_or_bytes.size());
+        }
     }
 }
 

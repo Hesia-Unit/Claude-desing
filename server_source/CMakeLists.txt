@@ -52,6 +52,7 @@ add_executable(hesia_server_cpp
     src/tls_utils.cpp
     src/security_audit.cpp
     src/policy.cpp
+    src/policy_ed25519_public_key.cpp
     src/hesia_server_session.cpp
 
     # Reuse protocol/crypto/channel code from the Drone implementation to maximize alignment

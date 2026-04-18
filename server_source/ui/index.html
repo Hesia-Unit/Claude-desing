@@ -1,0 +1,114 @@
+﻿<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HESIA // Command Interface</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="scanlines"></div>
+  <div class="hud">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-title">HESIA • eDEX‑INSPIRED</div>
+        <div class="brand-sub">Secure Drone Ops Console</div>
+      </div>
+      <div class="gauges">
+        <div class="gauge" data-key="cpu_temp_c" data-max="95" data-unit="°C">
+          <div class="gauge-face">
+            <div class="gauge-needle"></div>
+            <div class="gauge-center"></div>
+          </div>
+          <div class="gauge-label">CPU TEMP</div>
+          <div class="gauge-value">--</div>
+        </div>
+        <div class="gauge" data-key="cpu_usage_pct" data-max="100" data-unit="%">
+          <div class="gauge-face">
+            <div class="gauge-needle"></div>
+            <div class="gauge-center"></div>
+          </div>
+          <div class="gauge-label">CPU UTIL</div>
+          <div class="gauge-value">--</div>
+        </div>
+        <div class="gauge" data-key="ram_used_mb" data-max="8192" data-unit="MB" data-total="ram_total_mb">
+          <div class="gauge-face">
+            <div class="gauge-needle"></div>
+            <div class="gauge-center"></div>
+          </div>
+          <div class="gauge-label">RAM USED</div>
+          <div class="gauge-value">--</div>
+        </div>
+        <div class="gauge" data-key="voltage_v" data-max="20" data-unit="V">
+          <div class="gauge-face">
+            <div class="gauge-needle"></div>
+            <div class="gauge-center"></div>
+          </div>
+          <div class="gauge-label">VOLTAGE</div>
+          <div class="gauge-value">--</div>
+        </div>
+        <div class="gauge" data-key="current_a" data-max="10" data-unit="A">
+          <div class="gauge-face">
+            <div class="gauge-needle"></div>
+            <div class="gauge-center"></div>
+          </div>
+          <div class="gauge-label">AMPERAGE</div>
+          <div class="gauge-value">--</div>
+        </div>
+        <div class="gauge" data-key="power_w" data-max="120" data-unit="W">
+          <div class="gauge-face">
+            <div class="gauge-needle"></div>
+            <div class="gauge-center"></div>
+          </div>
+          <div class="gauge-label">POWER</div>
+          <div class="gauge-value">--</div>
+        </div>
+      </div>
+    </header>
+
+    <aside class="left">
+      <div class="panel terminal">
+        <div class="panel-title">TERMINAL / LOGS</div>
+        <div id="logView" class="terminal-body"></div>
+      </div>
+    </aside>
+
+    <main class="center">
+      <section class="panel video-panel">
+        <div class="panel-title">LIVE FEED</div>
+        <div class="video-screen">
+          <img id="videoFrame" alt="Live" />
+          <div class="video-overlay">
+            <div class="status-line" id="videoStatus">LIVE</div>
+            <div class="status-line" id="frameMeta">FRAME --</div>
+          </div>
+        </div>
+        <div class="video-controls">
+          <button id="btnBack">⟲ BACK</button>
+          <button id="btnPause">⏸ PAUSE</button>
+          <button id="btnLive">▶ LIVE</button>
+        </div>
+      </section>
+    </main>
+
+    <aside class="right">
+      <section class="panel globe-panel">
+        <div class="panel-title">DRONE GEO‑HOLO</div>
+        <canvas id="globeCanvas" width="360" height="260"></canvas>
+        <div class="globe-meta">
+          <div id="gpsReadout">GPS: --</div>
+          <div id="jetsonId">DRONE: --</div>
+        </div>
+      </section>
+
+      <section class="panel files-panel">
+        <div class="panel-title">FILESYSTEM</div>
+        <div id="filePath" class="file-path">/</div>
+        <div id="fileTree" class="file-tree"></div>
+      </section>
+    </aside>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

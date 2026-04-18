@@ -1,0 +1,48 @@
+project Hesia_Sentinel is
+   for Source_Dirs use (".");
+   for Object_Dir use "obj";
+   for Library_Dir use "lib";
+   for Library_Name use "hesia_sentinel";
+   for Library_Kind use "dynamic";
+   for Library_Interface use ("Hesia_Sentinel_Api");
+
+   for Source_Files use (
+      "hesia-sentinel_api.ads",
+      "hesia-sentinel_api.adb",
+      "hesia-sentinel_core.ads",
+      "hesia-sentinel_core.adb",
+      "hesia-sentinel_hash.ads",
+      "hesia-sentinel_hash.adb",
+      "hesia-sentinel_hw.ads",
+      "hesia-sentinel_hw.adb",
+      "hesia-sentinel_config.ads",
+      "hesia-sentinel_config.adb",
+      "hesia-sentinel_util.ads",
+      "hesia-sentinel_util.adb"
+   );
+
+   package Naming is
+      for Body ("Hesia_Sentinel_Api") use "hesia-sentinel_api.adb";
+      for Spec ("Hesia_Sentinel_Api") use "hesia-sentinel_api.ads";
+      for Body ("Hesia_Sentinel_Core") use "hesia-sentinel_core.adb";
+      for Spec ("Hesia_Sentinel_Core") use "hesia-sentinel_core.ads";
+      for Body ("Hesia_Sentinel_Hash") use "hesia-sentinel_hash.adb";
+      for Spec ("Hesia_Sentinel_Hash") use "hesia-sentinel_hash.ads";
+      for Body ("Hesia_Sentinel_HW") use "hesia-sentinel_hw.adb";
+      for Spec ("Hesia_Sentinel_HW") use "hesia-sentinel_hw.ads";
+      for Body ("Hesia_Sentinel_Config") use "hesia-sentinel_config.adb";
+      for Spec ("Hesia_Sentinel_Config") use "hesia-sentinel_config.ads";
+      for Body ("Hesia_Sentinel_Util") use "hesia-sentinel_util.adb";
+      for Spec ("Hesia_Sentinel_Util") use "hesia-sentinel_util.ads";
+   end Naming;
+
+   package Library_Builder is
+      -- gprlib uses -r (relocatable); disable PIE to avoid "-r and -pie" conflict
+      for Library_Options use ("-no-pie");
+   end Library_Builder;
+
+   package Compiler is
+      for Default_Switches ("Ada") use ("-fPIC");
+   end Compiler;
+
+end Hesia_Sentinel;

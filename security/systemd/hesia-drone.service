@@ -1,0 +1,39 @@
+[Unit]
+Description=HESIA Drone
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+SupplementaryGroups=video render tee hesia
+WorkingDirectory=/home/ajax/.cache/.hesia/src/drone
+EnvironmentFile=-/etc/hesia/hesia.env
+ExecStart=/opt/hesia/bin/hesia_drone
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictRealtime=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+TemporaryFileSystem=/tmp:rw,noexec,nosuid,nodev,mode=1777
+TemporaryFileSystem=/var/tmp:rw,noexec,nosuid,nodev,mode=1777
+NoExecPaths=/var/log/hesia /etc/hesia /home/ajax/.cache/.hesia
+ReadWritePaths=/var/log/hesia /home/ajax/.cache/.hesia
+
+[Install]
+WantedBy=multi-user.target

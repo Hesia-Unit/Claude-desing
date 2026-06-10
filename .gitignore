@@ -2,6 +2,8 @@
 server_source/keys/*.key
 server_source/keys/demo_secret.bin
 server_source/keys/demo_secret.pem
+server_source/keys/demo_public.bin
+server_source/keys/demo_public.pem
 server_source/keys/*.srl
 drone_transition_source/allowlist_priv.pem
 
@@ -14,3 +16,20 @@ drone_transition_source/allowlist_priv.pem
 **/frame_logs/
 **/decrypted_frames/
 **/*.tmp
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Sensitive local operator material
+artifacts/
+key-ssh/
+
+# Local scratch and probe files
+.codex-tmp*
+tmp_*
+runtime_sync_*.tar
+heal-point/*.txt
+drone_source/*.bak

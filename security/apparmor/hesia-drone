@@ -1,0 +1,47 @@
+#include <tunables/global>
+
+/opt/hesia/bin/hesia_drone flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/openssl>
+
+  network inet stream,
+  network inet6 stream,
+  network unix stream,
+  network unix dgram,
+
+  capability chown,
+  capability dac_override,
+  capability fowner,
+  capability setgid,
+  capability setuid,
+  capability sys_nice,
+
+  /opt/hesia/bin/hesia_drone mr,
+  /home/ajax/.cache/.hesia/** r,
+  /usr/lib/** mr,
+  /usr/local/lib/** mr,
+  /lib/** mr,
+  /lib64/** mr,
+
+  /etc/hesia/ r,
+  /etc/hesia/** rk,
+  /var/log/hesia/ rw,
+  /var/log/hesia/** rwk,
+
+  /dev/tee0 rw,
+  /dev/teepriv0 rw,
+  /dev/video[0-9]* rw,
+  /dev/nvhost* rw,
+  /dev/nvmap rw,
+  /dev/nvidia* rw,
+  /dev/i2c-[0-9]* rw,
+
+  /proc/** r,
+  /sys/** r,
+
+  deny /etc/shadow r,
+  deny /root/** rwklx,
+  deny /home/** wl,
+  deny /tmp/** mx,
+}

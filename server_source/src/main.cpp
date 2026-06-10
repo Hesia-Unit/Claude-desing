@@ -6,14 +6,17 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <deque>
 #include <mutex>
 #include <condition_variable>
+#include <set>
 #include <unordered_map>
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/pem.h>
+#include <openssl/x509v3.h>
 
 #ifdef _WIN32
   #include <winsock2.h>
@@ -22,16 +25,18 @@
 #else
   #include <arpa/inet.h>
   #include <netinet/in.h>
+  #include <sys/resource.h>
   #include <sys/socket.h>
+  #include <sys/prctl.h>
   #include <unistd.h>
 #endif
 
-#include "../../../IMPLEMENTATION/logger.hpp"
-#include "../../../IMPLEMENTATION/config.hpp"
+#include "../../drone_source/logger.hpp"
+#include "../../drone_source/config.hpp"
 #include "hesia_server_session.hpp"
 #include "tls_utils.hpp"
 #include "security_audit.hpp"
-#include "policy.hpp"
+#include "../include/policy.hpp"
 
 using hesia::Logger;
 using hesia::Config;
@@ -53,6 +58,128 @@ static std::string openssl_err_stack() {
 }
 
 static void require_file_exists(const std::string& path, const std::shared_ptr<Logger>& logger);
+
+static void apply_process_secret_hardening(const std::shared_ptr<Logger>& logger) {
+#ifndef _WIN32
+    struct rlimit rl{};
+    rl.rlim_cur = 0;
+    rl.rlim_max = 0;
+    if (setrlimit(RLIMIT_CORE, &rl) != 0 && logger) {
+        logger->warning("Failed to disable core dumps");
+    }
+    if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 && logger) {
+        logger->warning("Failed to set PR_SET_DUMPABLE=0");
+    }
+#else
+    (void)logger;
+#endif
+}
+
+static void reject_forensic_env_in_production_or_throw(const SecurityPolicy& policy) {
+    if (!policy.prod_fuse) {
+        return;
+    }
+    const char* vars[] = {
+        "HESIA_FORENSIC_MESSAGE_CAPTURE",
+        "HESIA_FORENSIC_VIDEO_CAPTURE",
+    };
+    for (const char* name : vars) {
+        const char* value = std::getenv(name);
+        if (value && *value) {
+            throw std::runtime_error(std::string("Production mode forbids forensic environment override: ") + name);
+        }
+    }
+}
+
+static std::string asn1_to_string(const ASN1_STRING* value) {
+    if (!value) {
+        return {};
+    }
+    unsigned char* utf8 = nullptr;
+    const int len = ASN1_STRING_to_UTF8(&utf8, value);
+    if (len < 0 || !utf8) {
+        return {};
+    }
+    std::string out(reinterpret_cast<char*>(utf8), static_cast<size_t>(len));
+    OPENSSL_free(utf8);
+    return out;
+}
+
+static std::set<std::string> get_dev_cert_markers() {
+    return {
+        "localhost",
+        "127.0.0.1",
+        "192.168.1.29",
+    };
+}
+
+static void reject_lab_certificate_in_production_or_throw(const SecurityPolicy& policy,
+                                                          const std::string& cert_path) {
+    if (!policy.prod_fuse) {
+        return;
+    }
+
+    FILE* fp = fopen(cert_path.c_str(), "rb");
+    if (!fp) {
+        throw std::runtime_error("Cannot open certificate for production validation: " + cert_path);
+    }
+    X509* cert = PEM_read_X509(fp, nullptr, nullptr, nullptr);
+    fclose(fp);
+    if (!cert) {
+        throw std::runtime_error("Cannot parse server certificate: " + cert_path);
+    }
+
+    const auto markers = get_dev_cert_markers();
+    auto matches_marker = [&](const std::string& value) {
+        return markers.find(value) != markers.end();
+    };
+
+    std::string reason;
+    X509_NAME* subject = X509_get_subject_name(cert);
+    const int cn_idx = X509_NAME_get_index_by_NID(subject, NID_commonName, -1);
+    if (cn_idx >= 0) {
+        X509_NAME_ENTRY* entry = X509_NAME_get_entry(subject, cn_idx);
+        ASN1_STRING* data = X509_NAME_ENTRY_get_data(entry);
+        const std::string cn = asn1_to_string(data);
+        if (matches_marker(cn)) {
+            reason = "CN=" + cn;
+        }
+    }
+
+    if (reason.empty()) {
+        GENERAL_NAMES* sans = reinterpret_cast<GENERAL_NAMES*>(
+            X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr));
+        if (sans) {
+            const int san_count = sk_GENERAL_NAME_num(sans);
+            for (int i = 0; i < san_count && reason.empty(); ++i) {
+                const GENERAL_NAME* name = sk_GENERAL_NAME_value(sans, i);
+                if (name->type == GEN_DNS) {
+                    const std::string dns = asn1_to_string(name->d.dNSName);
+                    if (matches_marker(dns)) {
+                        reason = "DNS SAN=" + dns;
+                    }
+                } else if (name->type == GEN_IPADD &&
+                           name->d.iPAddress &&
+                           ASN1_STRING_length(name->d.iPAddress) == 4) {
+                    const unsigned char* raw = ASN1_STRING_get0_data(name->d.iPAddress);
+                    char ipbuf[INET_ADDRSTRLEN]{0};
+                    if (raw && inet_ntop(AF_INET, raw, ipbuf, sizeof(ipbuf)) != nullptr) {
+                        const std::string ip = ipbuf;
+                        if (matches_marker(ip)) {
+                            reason = "IP SAN=" + ip;
+                        }
+                    }
+                }
+            }
+            GENERAL_NAMES_free(sans);
+        }
+    }
+
+    X509_free(cert);
+    if (!reason.empty()) {
+        throw std::runtime_error("Production mode rejects lab/development TLS certificate (" + reason + ")");
+    }
+}
 
 static std::vector<uint8_t> read_file_binary(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
@@ -146,7 +273,8 @@ static bool verify_ed25519_signature(const std::vector<uint8_t>& data,
 
 static void verify_release_signature_or_throw(const SecurityPolicy& policy,
                                               const std::shared_ptr<Logger>& logger,
-                                              const std::string& keys_dir) {
+                                              const std::string& keys_dir,
+                                              const std::string& secure_dir) {
     if (!policy.require_release_signature) return;
     if (policy.release_target_path.empty() ||
         policy.release_sig_path.empty() ||
@@ -154,9 +282,27 @@ static void verify_release_signature_or_throw(const SecurityPolicy& policy,
         throw std::runtime_error("Release signature required but paths not configured");
     }
 
-    const std::string target = resolve_path(keys_dir, policy.release_target_path);
-    const std::string sig_path = resolve_path(keys_dir, policy.release_sig_path);
-    const std::string pub_path = resolve_path(keys_dir, policy.release_pubkey_path);
+    auto resolve_release_input = [&](const std::string& value) -> std::string {
+        std::filesystem::path configured(value);
+        if (configured.is_absolute()) {
+            return configured.string();
+        }
+
+        const std::filesystem::path secure_candidate = std::filesystem::path(secure_dir) / configured;
+        if (std::filesystem::exists(secure_candidate)) {
+            return secure_candidate.string();
+        }
+
+        const std::filesystem::path keys_candidate = std::filesystem::path(keys_dir) / configured;
+        if (!policy.prod_fuse && std::filesystem::exists(keys_candidate)) {
+            return keys_candidate.string();
+        }
+        return secure_candidate.string();
+    };
+
+    const std::string target = resolve_release_input(policy.release_target_path);
+    const std::string sig_path = resolve_release_input(policy.release_sig_path);
+    const std::string pub_path = resolve_release_input(policy.release_pubkey_path);
 
     require_file_exists(target, logger);
     require_file_exists(sig_path, logger);
@@ -193,6 +339,11 @@ static int create_listen_socket(const std::string& bind_addr, int port) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(port));
     if (inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr) != 1) {
+#ifdef _WIN32
+        closesocket(fd);
+#else
+        ::close(fd);
+#endif
         return -1;
     }
 
@@ -291,6 +442,8 @@ int main() {
     root_logger->info("Initialisation serveur HESIA (C++)...");
 
     SecurityPolicy policy = load_security_policy_or_throw("server");
+    apply_process_secret_hardening(root_logger);
+    reject_forensic_env_in_production_or_throw(policy);
     Logger::set_debug_enabled(!policy.prod_fuse);
 
     const std::string bind_addr = policy.bind_addr;
@@ -303,7 +456,7 @@ int main() {
     const std::string keys_dir  = resolve_path(policy.policy_dir, policy.keys_dir);
     const std::string secure_dir = resolve_path(policy.policy_dir, policy.secure_dir);
 
-    verify_release_signature_or_throw(policy, root_logger, keys_dir);
+    verify_release_signature_or_throw(policy, root_logger, keys_dir, secure_dir);
 
     // OpenSSL init
     SSL_library_init();
@@ -324,6 +477,7 @@ int main() {
     require_file_exists(cert_path, root_logger);
     require_file_exists(key_path, root_logger);
     require_file_exists(ca_path, root_logger);
+    reject_lab_certificate_in_production_or_throw(policy, cert_path);
 
     if (SSL_CTX_use_certificate_file(ctx, cert_path.c_str(), SSL_FILETYPE_PEM) != 1) {
         root_logger->error("Load cert failed: " + cert_path + " : " + openssl_err_stack());
@@ -452,7 +606,7 @@ int main() {
             X509_free(peer_cert);
 
             try {
-                HesiaServerSession session(ssl, client_label, keys_dir, sess_logger, audit, policy);
+                HesiaServerSession session(ssl, client_label, keys_dir, secure_dir, sess_logger, audit, policy);
                 session.run();
             } catch (const std::exception& e) {
                 sess_logger->error(std::string("Session error: ") + e.what());

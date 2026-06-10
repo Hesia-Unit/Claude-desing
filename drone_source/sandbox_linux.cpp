@@ -67,14 +67,20 @@ void UnifiedSandbox::cleanup() {
         logger->info("Nettoyage du sandbox Linux");
     }
     
-    // Réinitialiser les restrictions
-    current_mode = SANDBOX_NONE;
+    // seccomp est irréversible pour le processus courant ; ne pas annoncer
+    // un sandbox désactivé alors que le filtre reste effectivement chargé.
+    if (!SeccompBPF::is_active()) {
+        current_mode = SANDBOX_NONE;
+    } else if (logger) {
+        logger->info("Seccomp reste actif jusqu'à la fin du processus");
+    }
     unified_initialized = false;
 }
 
 bool UnifiedSandbox::is_enabled() {
     std::lock_guard<std::mutex> lock(unified_mutex);
-    return unified_initialized && current_mode != SANDBOX_NONE;
+    return SeccompBPF::is_active() ||
+           (unified_initialized && current_mode != SANDBOX_NONE);
 }
 
 bool UnifiedSandbox::enable_mode(SandboxMode mode) {
@@ -85,6 +91,17 @@ bool UnifiedSandbox::enable_mode(SandboxMode mode) {
     }
     
     auto logger = setup_logger("SANDBOX", Config::LOG_DIR);
+
+    if (SeccompBPF::is_active()) {
+        if (current_mode == mode && current_mode != SANDBOX_NONE) {
+            if (logger) logger->info("Sandbox déjà actif dans le mode demandé");
+            return true;
+        }
+        if (logger) {
+            logger->warning("Seccomp déjà actif: impossible de remplacer le mode sandbox en cours");
+        }
+        return false;
+    }
     
     switch (mode) {
         case SANDBOX_STRICT:
@@ -119,6 +136,11 @@ bool UnifiedSandbox::enable_filesystem_mode() {
 
 bool UnifiedSandbox::enable_full_mode() {
     return enable_mode(SANDBOX_FULL);
+}
+
+UnifiedSandbox::SandboxMode UnifiedSandbox::get_current_mode() {
+    std::lock_guard<std::mutex> lock(unified_mutex);
+    return current_mode;
 }
 
 uint32_t UnifiedSandbox::get_total_violations() {

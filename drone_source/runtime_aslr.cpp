@@ -2,6 +2,7 @@
 #include "runtime_aslr.hpp"
 #include "logger.hpp"
 #include "config.hpp"
+#include "security_utils.hpp"
 #include <iostream>
 #include <random>
 #include <algorithm>
@@ -24,6 +25,18 @@
 
 namespace hesia {
 
+namespace {
+
+uint64_t secure_seed64() {
+    uint64_t seed = 0;
+    if (!SecureRNG::generate_bytes(reinterpret_cast<uint8_t*>(&seed), sizeof(seed))) {
+        throw std::runtime_error("SecureRNG::generate_bytes failed for ASLR seed");
+    }
+    return seed;
+}
+
+} // namespace
+
 // Variables statiques pour ASLR
 std::atomic<bool> RuntimeASLR::aslr_enabled{false};
 std::atomic<uint64_t> RuntimeASLR::randomization_seed{0};
@@ -40,9 +53,7 @@ bool RuntimeASLR::initialize() {
     auto logger = setup_logger("ASLR", Config::LOG_DIR);
     
     // Générer seed pour randomisation
-    std::random_device rd;
-    std::mt19937_64 gen(rd());
-    randomization_seed.store(gen());
+    randomization_seed.store(secure_seed64());
     
     // Vérifier si ASLR est déjà activé au niveau système
     bool system_aslr = check_system_aslr();
@@ -233,7 +244,6 @@ void RuntimeASLR::randomize_module_base(void* base_addr, size_t size) {
 void RuntimeASLR::randomize_heap_memory() {
 #ifndef _WIN32
     // Allouer des zones mémoire aléatoires pour fragmenter l'espace d'adressage
-    std::random_device rd;
     std::mt19937 gen(randomization_seed.load());
     std::uniform_int_distribution<size_t> size_dist(1024, 64*1024); // 1KB à 64KB
     
@@ -265,7 +275,6 @@ void RuntimeASLR::randomize_heap_memory() {
 void RuntimeASLR::randomize_stack_memory() {
 #ifndef _WIN32
     // Créer des frames de stack aléatoires
-    std::random_device rd;
     std::mt19937 gen(randomization_seed.load());
     std::uniform_int_distribution<size_t> stack_dist(8*1024, 32*1024); // 8KB à 32KB
     
@@ -298,7 +307,6 @@ void RuntimeASLR::randomize_stack_memory() {
 
 void* RuntimeASLR::get_randomized_base(size_t size) {
 #ifndef _WIN32
-    std::random_device rd;
     std::mt19937 gen(randomization_seed.load());
     
 #ifdef __x86_64__

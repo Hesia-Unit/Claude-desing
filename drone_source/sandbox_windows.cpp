@@ -273,6 +273,24 @@ void UnifiedSandbox::enable_full_mode() {
     logger->info("🛡️ Mode full activé");
 }
 
+UnifiedSandbox::SandboxMode UnifiedSandbox::get_current_mode() {
+    std::lock_guard<std::mutex> lock(config_mutex);
+
+    switch (current_config.type) {
+        case SandboxType::STRICT:
+            return SANDBOX_STRICT;
+        case SandboxType::NETWORK:
+            return SANDBOX_NETWORK;
+        case SandboxType::FILESYSTEM:
+            return SANDBOX_FILESYSTEM;
+        case SandboxType::FULL:
+            return SANDBOX_FULL;
+        case SandboxType::NONE:
+        default:
+            return SANDBOX_NONE;
+    }
+}
+
 void UnifiedSandbox::configure(const SandboxConfig& config) {
     std::lock_guard<std::mutex> lock(config_mutex);
     current_config = config;
@@ -354,8 +372,17 @@ std::string UnifiedSandbox::get_status_string() {
 }
 
 bool UnifiedSandbox::is_path_allowed(const std::string& path) {
+    for (const auto& blocked : current_config.blocked_paths) {
+        if (!blocked.empty() && path.find(blocked) == 0) {
+            return false;
+        }
+    }
+
+    const bool restrictions_expected =
+        current_config.type == SandboxType::FILESYSTEM ||
+        current_config.type == SandboxType::FULL;
     if (current_config.allowed_paths.empty()) {
-        return true; // Si aucune liste, tout autoriser
+        return !restrictions_expected;
     }
     
     for (const auto& allowed : current_config.allowed_paths) {
@@ -368,12 +395,21 @@ bool UnifiedSandbox::is_path_allowed(const std::string& path) {
 }
 
 bool UnifiedSandbox::is_domain_allowed(const std::string& domain) {
+    for (const auto& blocked : current_config.blocked_domains) {
+        if (!blocked.empty() && domain.find(blocked) != std::string::npos) {
+            return false;
+        }
+    }
+
+    const bool restrictions_expected =
+        current_config.type == SandboxType::NETWORK ||
+        current_config.type == SandboxType::FULL;
     if (current_config.allowed_domains.empty()) {
-        return true; // Si aucune liste, tout autoriser
+        return !restrictions_expected;
     }
     
     for (const auto& allowed : current_config.allowed_domains) {
-        if (domain.find(allowed) != std::string::npos) {
+        if (!allowed.empty() && domain.find(allowed) != std::string::npos) {
             return true;
         }
     }

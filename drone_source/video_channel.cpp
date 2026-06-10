@@ -8,6 +8,7 @@
 #include <atomic>
 #include "config.hpp"
 #include "security_utils.hpp"
+#include "video_packet_parser.hpp"
 
 #ifdef HESIA_USE_FIPS_MODULE
 #include "fips_module.hpp"
@@ -57,25 +58,8 @@ std::vector<uint8_t> VideoPacket::serialize() const {
 }
 
 VideoPacket VideoPacket::deserialize(const std::vector<uint8_t>& data) {
-    if (data.size() < 24) {
-        throw std::runtime_error("Paquet trop court");
-    }
-    
-    // ✅ SÉCURITÉ: Extraction sécurisée avec cast explicite pour éviter UB
-    uint32_t sid = (static_cast<uint32_t>(data[0]) << 24) | 
-                    (static_cast<uint32_t>(data[1]) << 16) | 
-                    (static_cast<uint32_t>(data[2]) << 8) | 
-                    static_cast<uint32_t>(data[3]);
-    // ✅ SÉCURITÉ: Extraction sécurisée frame_id avec cast explicite
-    uint64_t fid = 0;
-    for (int i = 0; i < 8; i++) {
-        fid = (fid << 8) | static_cast<uint64_t>(data[4 + i]);
-    }
-    
-    std::vector<uint8_t> iv(data.begin() + 12, data.begin() + 24);
-    std::vector<uint8_t> payload(data.begin() + 24, data.end());
-    
-    return VideoPacket(sid, fid, iv, payload);
+    ParsedVideoPacketFields parsed = parse_video_packet_fields(data);
+    return VideoPacket(parsed.stream_id, parsed.frame_id, parsed.iv, parsed.payload);
 }
 
 std::vector<uint8_t> VideoChannel::make_iv(uint64_t frame_id) {
@@ -276,6 +260,17 @@ std::vector<uint8_t> VideoChannel::decrypt_frame(const VideoPacket& packet) {
         throw VideoChannelError("IV invalide");
     }
 
+    // Défense en profondeur: l'IV doit encoder exactement le frame_id annoncé
+    // dans ses 8 octets de compteur (big-endian). Cela empêche un émetteur de
+    // découpler le nonce réellement utilisé du frame_id servant à l'AAD et à la
+    // fenêtre anti-rejeu, et garantit l'unicité (clé, nonce) par trame.
+    for (int i = 0; i < 8; i++) {
+        const uint8_t expected = static_cast<uint8_t>((packet.frame_id >> (i * 8)) & 0xFF);
+        if (packet.iv[11 - i] != expected) {
+            throw VideoChannelError("IV non lié au frame_id (nonce incohérent)");
+        }
+    }
+
     if (packet.payload.size() < 16) {
         throw VideoChannelError("Payload trop court");
     }
@@ -427,3 +422,4 @@ void VideoChannel::rotate_key(const std::vector<uint8_t>& new_key) {
 }
 
 } // namespace hesia
+

@@ -276,6 +276,9 @@ std::vector<uint8_t> Serializer::serialize_drone_auth(const BlockDroneAuth& auth
     write_bytes(result, auth.session_id);
     write_bytes(result, auth.transcript_hash);
     write_bytes(result, auth.server_cert_sha256);
+    write_bytes(result, auth.boot_measure_digest);
+    write_bytes(result, auth.tee_attestation_pubkey);
+    write_bytes(result, auth.tee_attestation_signature);
 
     return result;
 }
@@ -294,6 +297,9 @@ BlockDroneAuth Serializer::deserialize_drone_auth(const std::vector<uint8_t>& da
     auth.session_id = read_bytes(data, offset);
     auth.transcript_hash = read_bytes(data, offset);
     auth.server_cert_sha256 = read_bytes(data, offset);
+    auth.boot_measure_digest = read_bytes(data, offset);
+    auth.tee_attestation_pubkey = read_bytes(data, offset);
+    auth.tee_attestation_signature = read_bytes(data, offset);
 
     require_string_len(auth.drone_id, 128, "BlockDroneAuth.drone_id");
     require_size_range(auth.drone_pubkey, 1, kMaxKeyBlobLen, "BlockDroneAuth.drone_pubkey");
@@ -305,6 +311,9 @@ BlockDroneAuth Serializer::deserialize_drone_auth(const std::vector<uint8_t>& da
     require_size_range(auth.session_id, 16, 128, "BlockDroneAuth.session_id");
     require_size_eq(auth.transcript_hash, 64, "BlockDroneAuth.transcript_hash");
     require_size_eq(auth.server_cert_sha256, 32, "BlockDroneAuth.server_cert_sha256");
+    require_size_eq(auth.boot_measure_digest, 64, "BlockDroneAuth.boot_measure_digest");
+    require_size_range(auth.tee_attestation_pubkey, 0, kMaxKeyBlobLen, "BlockDroneAuth.tee_attestation_pubkey");
+    require_size_range(auth.tee_attestation_signature, 0, kMaxSignatureLen, "BlockDroneAuth.tee_attestation_signature");
 
     if (offset != data.size()) {
         throw std::runtime_error("DRONE_AUTH: trailing bytes not allowed");
@@ -335,7 +344,7 @@ BlockServerAuth Serializer::deserialize_server_auth(const std::vector<uint8_t>& 
     auth.signature = read_bytes(data, offset);
 
     require_string_len(auth.server_id, 128, "BlockServerAuth.server_id");
-    require_size_range(auth.server_pubkey, 0, kMaxKeyBlobLen, "BlockServerAuth.server_pubkey");  // ✅ Autoriser clé vide
+    require_size_range(auth.server_pubkey, 1, kMaxKeyBlobLen, "BlockServerAuth.server_pubkey");
     require_string_len(auth.mission_id, 256, "BlockServerAuth.mission_id");
     require_size_eq(auth.policy_hash, 64, "BlockServerAuth.policy_hash");
     require_size_eq(auth.last_block_hash, 64, "BlockServerAuth.last_block_hash");

@@ -1,4 +1,4 @@
-#include <sys/socket.h>
+﻿#include <sys/socket.h>
 #include <netinet/in.h>
 #ifndef _WIN32
 #include <netdb.h>
@@ -22,6 +22,9 @@
 #include <fstream>
 #include <cstring>
 #include <optional>
+#include <array>
+#include <cstdlib>
+#include <cctype>
 
 #ifndef _WIN32
 #include <pthread.h>
@@ -85,11 +88,101 @@ struct TelemetrySnapshot {
     double voltage_v = -1.0;
     double current_a = -1.0;
     double power_w = -1.0;
-    double gps_lat = 48.8566;   // Position simulée (Paris) - SIMULATED placeholder
-    double gps_lon = 2.3522;
-    double gps_alt_m = 35.0;
+    double gps_lat = -1.0;
+    double gps_lon = -1.0;
+    double gps_alt_m = -1.0;
     uint64_t ts_ms = 0;
 };
+
+static std::string trim_copy(const std::string& input) {
+    size_t start = 0;
+    while (start < input.size() && std::isspace(static_cast<unsigned char>(input[start])) != 0) {
+        ++start;
+    }
+    size_t end = input.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(input[end - 1])) != 0) {
+        --end;
+    }
+    return input.substr(start, end - start);
+}
+
+static bool extract_named_number(const std::string& text, const std::string& key, double& out) {
+    const std::array<std::string, 4> needles = {
+        "\"" + key + "\"",
+        key + "=",
+        key + ":",
+        key + " "
+    };
+
+    for (const auto& needle : needles) {
+        size_t pos = text.find(needle);
+        if (pos == std::string::npos) {
+            continue;
+        }
+        pos += needle.size();
+        while (pos < text.size() &&
+               (std::isspace(static_cast<unsigned char>(text[pos])) != 0 ||
+                text[pos] == '=' || text[pos] == ':' || text[pos] == '"')) {
+            ++pos;
+        }
+        if (pos >= text.size()) {
+            continue;
+        }
+        char* endptr = nullptr;
+        const double value = std::strtod(text.c_str() + pos, &endptr);
+        if (endptr != text.c_str() + pos) {
+            out = value;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void populate_gps_fix_from_text(const std::string& text, TelemetrySnapshot& snapshot) {
+    double lat = -1.0;
+    double lon = -1.0;
+    double alt = -1.0;
+    const bool have_lat = extract_named_number(text, "gps_lat", lat) || extract_named_number(text, "lat", lat);
+    const bool have_lon = extract_named_number(text, "gps_lon", lon) || extract_named_number(text, "lon", lon);
+    const bool have_alt = extract_named_number(text, "gps_alt_m", alt) ||
+                          extract_named_number(text, "alt", alt) ||
+                          extract_named_number(text, "altitude", alt);
+
+    if (have_lat && have_lon &&
+        lat >= -90.0 && lat <= 90.0 &&
+        lon >= -180.0 && lon <= 180.0) {
+        snapshot.gps_lat = lat;
+        snapshot.gps_lon = lon;
+        if (have_alt) {
+            snapshot.gps_alt_m = alt;
+        }
+    }
+}
+
+static void try_read_gps_fix(TelemetrySnapshot& snapshot) {
+    const char* env_path = std::getenv("HESIA_GPS_FIX_PATH");
+    const std::filesystem::path path = (env_path && env_path[0] != '\0')
+        ? std::filesystem::path(env_path)
+        : std::filesystem::path("/run/hesia/gps.fix");
+
+    if (!std::filesystem::exists(path) || !std::filesystem::is_regular_file(path)) {
+        return;
+    }
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) {
+        return;
+    }
+
+    std::ostringstream buffer;
+    buffer << f.rdbuf();
+    const std::string text = trim_copy(buffer.str());
+    if (text.empty()) {
+        return;
+    }
+
+    populate_gps_fix_from_text(text, snapshot);
+}
 
 static bool read_file_double(const std::filesystem::path& path, double& out) {
     std::ifstream f(path);
@@ -119,7 +212,7 @@ static double read_cpu_temp_max_c() {
         const auto temp_path = entry.path() / "temp";
         double v = 0.0;
         if (!read_file_double(temp_path, v)) continue;
-        if (v > 1000.0) v /= 1000.0; // m°C -> °C
+        if (v > 1000.0) v /= 1000.0; // mÂ°C -> Â°C
         if (v > max_c) max_c = v;
     }
     return max_c;
@@ -213,6 +306,9 @@ static TelemetrySnapshot collect_telemetry_snapshot() {
     TelemetrySnapshot t;
     t.ts_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
+    t.gps_lat = -1.0;
+    t.gps_lon = -1.0;
+    t.gps_alt_m = -1.0;
 
     t.cpu_temp_c = read_cpu_temp_max_c();
     t.cpu_usage_pct = read_cpu_usage_pct();
@@ -222,6 +318,7 @@ static TelemetrySnapshot collect_telemetry_snapshot() {
     t.voltage_v = read_ina_value("in_voltage", 0.001);
     t.current_a = read_ina_value("in_current", 0.001);
     t.power_w = read_ina_value("in_power", 0.001);
+    try_read_gps_fix(t);
 
     return t;
 }
@@ -229,12 +326,18 @@ static TelemetrySnapshot collect_telemetry_snapshot() {
 } // namespace
 
 DroneNetworkClient::DroneNetworkClient(const std::string& drone_id) 
-    : drone(std::make_unique<HesiaDrone>(drone_id)), 
-      socket_fd(INVALID_SOCKET), connected(false), 
+    : drone(std::make_unique<HesiaDrone>(drone_id)),
+      policy_(load_security_policy_or_throw("drone")),
+      socket_fd(INVALID_SOCKET), connected(false),
+      tls_enabled(true),
+      tls_verify_peer(true),
+      tls_pin_server_pubkey(policy_.tls_pin),
+      tls_rekey_bytes_threshold(policy_.tls_rekey_bytes),
+      tls_rekey_seconds(policy_.tls_rekey_seconds),
       video_running(true), workers_running(false),
       frame_counter(0), ping_counter(0) {
-    
-    policy_ = load_security_policy_or_throw("drone");
+
+    send_queue_max = std::max<std::size_t>(policy_.video_send_queue_max, static_cast<std::size_t>(8));
     Logger::set_debug_enabled(!policy_.prod_fuse);
 
     logger = setup_logger("HESIA-DRONE", Config::LOG_DIR);
@@ -269,11 +372,6 @@ DroneNetworkClient::DroneNetworkClient(const std::string& drone_id)
             throw SecurityViolation("mTLS required by policy");
         }
 
-        tls_enabled = true;
-        tls_verify_peer = true;
-        tls_pin_server_pubkey = policy_.tls_pin;
-        tls_rekey_bytes_threshold = policy_.tls_rekey_bytes;
-        tls_rekey_seconds = policy_.tls_rekey_seconds;
         tls = std::make_unique<TLSChannel>();
 
         TLSChannel::TLSPaths paths;
@@ -287,29 +385,31 @@ DroneNetworkClient::DroneNetworkClient(const std::string& drone_id)
     
     // Initialiser les protections runtime AVANT toute autre chose
     logger->info(" Initialisation des protections runtime...");
-    // RuntimeProtection::setup_protection(); // Commenté pour éviter erreur de compilation
+    // RuntimeProtection::setup_protection(); // CommentÃ© pour Ã©viter erreur de compilation
     
-    // Vérifier l'environnement au démarrage
+    // VÃ©rifier l'environnement au dÃ©marrage
+    RuntimeProtection::setup_protection();
+
     if (!RuntimeProtection::detect_debugger()) {
-        logger->info(" Aucun débogueur détecté");
+        logger->info(" Aucun dÃ©bogueur dÃ©tectÃ©");
     } else {
-        logger->error(" Débogueur détecté - Arrêt sécurité");
+        logger->error(" DÃ©bogueur dÃ©tectÃ© - ArrÃªt sÃ©curitÃ©");
         RuntimeProtection::emergency_shutdown();
-        if (false) { // Simplifié pour compilation
-            logger->warning("Vérification bibliothèques désactivée pour compilation");
+        if (false) { // SimplifiÃ© pour compilation
+            logger->warning("VÃ©rification bibliothÃ¨ques dÃ©sactivÃ©e pour compilation");
         }    
         return;
     }
     
-    logger->info(" Protections runtime actives - Mode production sécurisé");
+    logger->info(" Protections runtime actives - Mode production sÃ©curisÃ©");
     
     // Initialiser le pool de frames
     frame_buffer_pool.reserve(FRAME_POOL_SIZE);
     
-    // Paramètres JPEG
+    // ParamÃ¨tres JPEG
     jpeg_params = {cv::IMWRITE_JPEG_QUALITY, 70, cv::IMWRITE_JPEG_PROGRESSIVE, 1};
     
-    // Initialiser le répertoire de logging des frames
+    // Initialiser le rÃ©pertoire de logging des frames
     if (frame_logging_enabled.load()) {
         frame_log_dir = Config::BASE_DIR / "frame_logs";
         std::filesystem::create_directories(frame_log_dir);
@@ -321,7 +421,7 @@ DroneNetworkClient::DroneNetworkClient(const std::string& drone_id)
     });
     
     error_handler->register_callback(ErrorCategory::MEMORY, [this](const ErrorInfo& error) {
-        logger->warning("Erreur mémoire: " + error.message);
+        logger->warning("Erreur mÃ©moire: " + error.message);
         std::lock_guard<std::mutex> lock(frame_pool_mutex);
         frame_buffer_pool.clear();
     });
@@ -341,6 +441,43 @@ DroneNetworkClient::~DroneNetworkClient() {
 #endif
 }
 
+void DroneNetworkClient::mark_transport_failure(const std::string& reason) {
+    const bool was_connected = connected.exchange(false);
+    transport_failed_.store(true);
+    send_running.store(false);
+    telemetry_running.store(false);
+    video_running.store(false);
+    {
+        std::lock_guard<std::mutex> lock(send_queue_mutex);
+        send_queue.clear();
+    }
+    send_queue_cv.notify_all();
+    frame_sync_cv.notify_all();
+
+    if (audit) {
+        audit->event("TRANSPORT_FAIL", "ERROR", reason);
+    }
+
+    if (was_connected) {
+        logger->error("Transport failure: " + reason);
+    }
+
+    if (tls_enabled && tls) {
+        try {
+            tls->close();
+        } catch (...) {
+        }
+    }
+
+    if (socket_fd != INVALID_SOCKET) {
+#ifdef _WIN32
+        ::shutdown(socket_fd, SD_BOTH);
+#else
+        ::shutdown(socket_fd, SHUT_RDWR);
+#endif
+    }
+}
+
 bool DroneNetworkClient::connect(const std::string& host, int port, int timeout, int retries) {
     auto close_current_socket = [&]() {
         if (socket_fd != INVALID_SOCKET) {
@@ -352,7 +489,7 @@ bool DroneNetworkClient::connect(const std::string& host, int port, int timeout,
     for (int attempt = 1; attempt <= retries; ++attempt) {
         try {
             logger->info("Connexion " + std::to_string(attempt) + "/" + std::to_string(retries) +
-                         " à " + host + ":" + std::to_string(port));
+                         " Ã  " + host + ":" + std::to_string(port));
 
             close_current_socket();
 
@@ -405,7 +542,10 @@ bool DroneNetworkClient::connect(const std::string& host, int port, int timeout,
             }
 
             // --- TLS 1.3 transport (mTLS required) ---
-            if (tls_enabled && tls) {
+            if (!(tls_enabled && tls)) {
+                throw SecurityViolation("TLS transport is mandatory for HESIA drone sessions");
+            }
+            {
                 bool verify_peer = tls_verify_peer;
 
                 // Optional SPKI pinning (policy-controlled)
@@ -454,16 +594,13 @@ bool DroneNetworkClient::connect(const std::string& host, int port, int timeout,
                 // Reset rekey accounting after handshake
                 tls_bytes_since_rekey = 0;
                 tls_last_rekey = std::chrono::steady_clock::now();
-            } else {
-                // No TLS => no exporter binding
-                drone->set_tls_exporter_secret({});
-                drone->set_tls_peer_cert_sha256({});
             }
 
             connected.store(true);
+            transport_failed_.store(false);
             stats.start_time_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
 
-            logger->info("✓ Connexion établie");
+            logger->info("âœ“ Connexion Ã©tablie");
             if (audit) {
                 audit->event("CONNECT_OK", "INFO", "host=" + host + ":" + std::to_string(port));
             }
@@ -482,7 +619,7 @@ bool DroneNetworkClient::connect(const std::string& host, int port, int timeout,
         }
     }
 
-    logger->error("Échec connexion après " + std::to_string(retries) + " tentatives");
+    logger->error("Ã‰chec connexion aprÃ¨s " + std::to_string(retries) + " tentatives");
     return false;
 }
 
@@ -491,23 +628,11 @@ int DroneNetworkClient::transport_write_all(const uint8_t* data, size_t len) {
     size_t total = 0;
     while (total < len) {
         int w = -1;
-        if (tls_enabled && tls && tls->is_connected()) {
-            w = tls->write(data + total, static_cast<int>(len - total));
-        } else {
-            ssize_t sent = ::send(socket_fd, reinterpret_cast<const char*>(data + total),
-                                  static_cast<int>(len - total), 0);
-#ifdef _WIN32
-            if (sent <= 0) return -1;
-#else
-            if (sent < 0) {
-                if (errno == EINTR) continue;
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return -1;
-                return -1;
-            }
-            if (sent == 0) return -1;
-#endif
-            w = static_cast<int>(sent);
+        if (!(tls_enabled && tls && tls->is_connected())) {
+            mark_transport_failure("TLS transport dropped before write");
+            return -1;
         }
+        w = tls->write(data + total, static_cast<int>(len - total));
         if (w <= 0) return -1;
         total += static_cast<size_t>(w);
     }
@@ -518,24 +643,15 @@ int DroneNetworkClient::transport_read_all(uint8_t* data, size_t len) {
     size_t total = 0;
     while (total < len) {
         int r = -1;
-        if (tls_enabled && tls && tls->is_connected()) {
-            r = tls->read(data + total, static_cast<int>(len - total));
-        } else {
-            ssize_t recvd = ::recv(socket_fd, reinterpret_cast<char*>(data + total),
-                                   static_cast<int>(len - total), 0);
-#ifdef _WIN32
-            if (recvd <= 0) return -1;
-#else
-            if (recvd < 0) {
-                if (errno == EINTR) continue;
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return -1;
-                return -1;
-            }
-            if (recvd == 0) return -1;
-#endif
-            r = static_cast<int>(recvd);
+        if (!(tls_enabled && tls && tls->is_connected())) {
+            mark_transport_failure("TLS transport dropped before read");
+            return -1;
         }
-        if (r <= 0) return -1;
+        r = tls->read(data + total, static_cast<int>(len - total));
+        if (r <= 0) {
+            mark_transport_failure("transport_read_all returned no data");
+            return -1;
+        }
         total += static_cast<size_t>(r);
     }
     return static_cast<int>(total);
@@ -556,6 +672,9 @@ void DroneNetworkClient::tls_maybe_rekey() {
 }
 
 bool DroneNetworkClient::send_message(const std::vector<uint8_t>& message, const std::string& message_type) {
+    if (transport_failed_.load() || !connected.load() || socket_fd == INVALID_SOCKET) {
+        return false;
+    }
     try {
         std::lock_guard<std::mutex> lock(send_mutex);
         // 1-byte application prefix to disambiguate payloads in SECURE_SESSION
@@ -610,23 +729,56 @@ bool DroneNetworkClient::send_message(const std::vector<uint8_t>& message, const
         return true;
     } catch (const std::exception& e) {
         logger->error("Erreur envoi: " + std::string(e.what()));
+        mark_transport_failure("send_message(" + message_type + "): " + e.what());
         return false;
     }
 }
 
+bool DroneNetworkClient::enqueue_secure_message(const std::string& msg_type,
+                                                const std::string& json_data) {
+    // La construction du message sécurisé fait avancer la chaîne last_block_hash
+    // (utilisée comme AAD AES-GCM) et le compteur de séquence dans HesiaDrone.
+    // Cette section doit être atomique avec la mise en file: sinon deux threads
+    // peuvent (1) accéder de façon concurrente à last_block_hash (course de
+    // données / UB) et (2) enfiler les messages dans un ordre différent de celui
+    // du chaînage, ce qui provoque un échec d'authentification GCM côté serveur
+    // et la fermeture de la session.
+    std::lock_guard<std::mutex> lock(secure_send_mutex);
+    std::vector<uint8_t> msg = drone->send_secure_message(msg_type, json_data);
+    return enqueue_message(std::move(msg), "SECURE_MSG");
+}
+
 bool DroneNetworkClient::enqueue_message(std::vector<uint8_t>&& data, const std::string& type) {
-    if (!connected.load() || socket_fd == INVALID_SOCKET) {
+    if (transport_failed_.load() || !connected.load() || socket_fd == INVALID_SOCKET) {
         return false;
     }
     {
         std::lock_guard<std::mutex> lock(send_queue_mutex);
         if (send_queue.size() >= send_queue_max) {
             if (type == "VIDEO_DATA") {
-                logger->warning("[VIDEO] Drop frame (queue full)");
+                ++dropped_video_frames_;
+                if (should_log_backpressure(last_video_drop_log_tp_, std::chrono::milliseconds(1000))) {
+                    logger->warning("[VIDEO] Drop frame (queue full, depth=" +
+                                    std::to_string(send_queue.size()) +
+                                    ", dropped=" + std::to_string(dropped_video_frames_) + ")");
+                }
                 return false;
             }
-            logger->warning("Drop message (queue full) type=" + type);
-            return false;
+            auto video_it = std::find_if(send_queue.begin(), send_queue.end(),
+                                         [](const auto& item) { return item.second == "VIDEO_DATA"; });
+            if (video_it != send_queue.end()) {
+                send_queue.erase(video_it);
+                ++dropped_video_frames_;
+                ++preserved_control_messages_;
+                if (should_log_backpressure(last_control_pressure_log_tp_, std::chrono::milliseconds(1000))) {
+                    logger->warning("Control traffic preserved under backpressure: oldest VIDEO_DATA evicted "
+                                    "(saved=" + std::to_string(preserved_control_messages_) +
+                                    ", dropped_video=" + std::to_string(dropped_video_frames_) + ")");
+                }
+            } else {
+                logger->warning("Drop message (queue full, no video to evict) type=" + type);
+                return false;
+            }
         }
         send_queue.emplace_back(std::move(data), type);
     }
@@ -635,14 +787,14 @@ bool DroneNetworkClient::enqueue_message(std::vector<uint8_t>&& data, const std:
 }
 
 void DroneNetworkClient::send_loop() {
-    while (send_running.load()) {
+    while (send_running.load() && connected.load() && !transport_failed_.load()) {
         std::pair<std::vector<uint8_t>, std::string> item;
         {
             std::unique_lock<std::mutex> lock(send_queue_mutex);
             send_queue_cv.wait_for(lock, std::chrono::milliseconds(200), [this] {
                 return !send_queue.empty() || !send_running.load();
             });
-            if (!send_running.load()) {
+            if (!send_running.load() || !connected.load() || transport_failed_.load()) {
                 return;
             }
             if (send_queue.empty()) {
@@ -652,9 +804,27 @@ void DroneNetworkClient::send_loop() {
             send_queue.pop_front();
         }
         if (!send_message(item.first, item.second)) {
-            logger->warning("Send failed (queued) type=" + item.second);
+            if (!connected.load() || transport_failed_.load()) {
+                send_running.store(false);
+                send_queue_cv.notify_all();
+                return;
+            }
+            if (item.second != "VIDEO_DATA" ||
+                should_log_backpressure(last_send_fail_log_tp_, std::chrono::milliseconds(1000))) {
+                logger->warning("Send failed (queued) type=" + item.second);
+            }
         }
     }
+}
+
+bool DroneNetworkClient::should_log_backpressure(std::chrono::steady_clock::time_point& last_log,
+                                                 std::chrono::milliseconds interval) {
+    const auto now = std::chrono::steady_clock::now();
+    if (last_log.time_since_epoch().count() == 0 || (now - last_log) >= interval) {
+        last_log = now;
+        return true;
+    }
+    return false;
 }
 
 std::vector<uint8_t> DroneNetworkClient::receive_message(int timeout) {
@@ -662,7 +832,7 @@ std::vector<uint8_t> DroneNetworkClient::receive_message(int timeout) {
     try {
         std::vector<uint8_t> header(4);
         if (transport_read_all(header.data(), header.size()) != 4) {
-            logger->warning("Connexion fermée par le serveur");
+            logger->warning("Connexion fermÃ©e par le serveur");
             return {};
         }
 
@@ -679,7 +849,7 @@ std::vector<uint8_t> DroneNetworkClient::receive_message(int timeout) {
         std::vector<uint8_t> data(expected_size);
         if (expected_size > 0) {
             if (transport_read_all(data.data(), expected_size) != static_cast<int>(expected_size)) {
-                logger->warning("Données incomplètes");
+                logger->warning("DonnÃ©es incomplÃ¨tes");
                 return {};
             }
         }
@@ -690,30 +860,31 @@ std::vector<uint8_t> DroneNetworkClient::receive_message(int timeout) {
         return data;
     } catch (const std::exception& e) {
         error_handler->handle_exception(e, ErrorSeverity::ERROR, ErrorCategory::NETWORK, "receive_message");
+        mark_transport_failure("receive_message: " + std::string(e.what()));
         return {};
     }
 }
 
 bool DroneNetworkClient::handshake() {
     logger->info("============================================================");
-    logger->info("DÉBUT HANDSHAKE HESIA");
+    logger->info("DÃ‰BUT HANDSHAKE HESIA");
     logger->info("============================================================");
     
     auto start_time = std::chrono::high_resolution_clock::now();
     
     try {
         // ------------------------------------------------------------
-        // 1. Échange HELLO
+        // 1. Ã‰change HELLO
         // ------------------------------------------------------------
-        logger->info("[1/5] Échange HELLO");
+        logger->info("[1/5] Ã‰change HELLO");
         Hello hello = drone->build_hello();
         std::vector<uint8_t> hello_data = Serializer::serialize_hello(hello);
         
         if (!send_message(hello_data, "HELLO")) {
-            throw std::runtime_error("Échec envoi HELLO");
+            throw std::runtime_error("Ã‰chec envoi HELLO");
         }
         
-        logger->info("✓ HELLO envoyé");
+        logger->info("âœ“ HELLO envoyÃ©");
         
         // ------------------------------------------------------------
         // 2. Recevoir HELLO_ACK + KEY_INIT
@@ -723,45 +894,45 @@ bool DroneNetworkClient::handshake() {
         // Recevoir HELLO_ACK
         std::vector<uint8_t> hello_ack_data = receive_message();
         if (hello_ack_data.empty()) {
-            throw std::runtime_error("Pas de HELLO_ACK reçu");
+            throw std::runtime_error("Pas de HELLO_ACK reÃ§u");
         }
         
         HelloAck ack = Serializer::deserialize_hello_ack(hello_ack_data);
         drone->handle_hello_ack(ack);
-        logger->info("✓ HELLO_ACK validé");
+        logger->info("âœ“ HELLO_ACK validÃ©");
         
-        // Recevoir KEY_INIT (immédiatement après HELLO_ACK)
+        // Recevoir KEY_INIT (immÃ©diatement aprÃ¨s HELLO_ACK)
         std::vector<uint8_t> key_init_data = receive_message();
         if (key_init_data.empty()) {
-            throw std::runtime_error("Pas de KEY_INIT reçu après HELLO_ACK");
+            throw std::runtime_error("Pas de KEY_INIT reÃ§u aprÃ¨s HELLO_ACK");
         }
         
         KeyInit key_init = Serializer::deserialize_key_init(key_init_data);
-        logger->info("✓ KeyInit reçu - Taille clé Kyber: " + std::to_string(key_init.kyber_pubkey.size()) + " bytes");
+        logger->info("âœ“ KeyInit reÃ§u - Taille clÃ© Kyber: " + std::to_string(key_init.kyber_pubkey.size()) + " bytes");
         
         // ------------------------------------------------------------
-        // 3. Échange KYBER (KEY_RESP)
+        // 3. Ã‰change KYBER (KEY_RESP)
         // ------------------------------------------------------------
-        logger->info("[3/5] Échange KYBER");
+        logger->info("[3/5] Ã‰change KYBER");
         KeyResp key_resp = drone->handle_key_init(key_init);
         std::vector<uint8_t> key_resp_data = Serializer::serialize_key_resp(key_resp);
         
         if (!send_message(key_resp_data, "KEY_RESP")) {
-            throw std::runtime_error("Échec envoi KEY_RESP");
+            throw std::runtime_error("Ã‰chec envoi KEY_RESP");
         }
         
-        // Vérification anti-DoS: timeout et binding contexte
+        // VÃ©rification anti-DoS: timeout et binding contexte
         auto current_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time);
         
         if (duration.count() > 10000) { // 10 secondes max
-            throw SecurityViolation("Timeout réponse serveur - possible DoS par fenêtre rejeu");
+            throw SecurityViolation("Timeout rÃ©ponse serveur - possible DoS par fenÃªtre rejeu");
         }
         
         // Attendre KEY_CONFIRM du serveur (preuve + binding transcript)
         std::vector<uint8_t> key_confirm_data = receive_message();
         if (key_confirm_data.empty()) {
-            throw std::runtime_error("Pas de KEY_CONFIRM reçu");
+            throw std::runtime_error("Pas de KEY_CONFIRM reÃ§u");
         }
 
         KeyConfirm kc = Serializer::deserialize_key_confirm(key_confirm_data);
@@ -775,9 +946,9 @@ bool DroneNetworkClient::handshake() {
         transcript.insert(transcript.end(), key_resp_data.begin(), key_resp_data.end());
         std::vector<uint8_t> transcript_hash = hash_data(transcript);
 
-        // Vérifier KEY_CONFIRM + signature serveur AVANT d'accepter la session
+        // VÃ©rifier KEY_CONFIRM + signature serveur AVANT d'accepter la session
         drone->handle_key_confirm(kc, transcript_hash);
-        logger->info("✓ KEY_CONFIRM vérifié (transcript + signature serveur)");
+        logger->info("âœ“ KEY_CONFIRM vÃ©rifiÃ© (transcript + signature serveur)");
         
         // ------------------------------------------------------------
         // 4. DRONE AUTH
@@ -787,7 +958,7 @@ bool DroneNetworkClient::handshake() {
         std::vector<uint8_t> drone_auth_data = Serializer::serialize_drone_auth(drone_auth);
         
         if (!send_message(drone_auth_data, "DRONE_AUTH")) {
-            throw std::runtime_error("Échec envoi DRONE_AUTH");
+            throw std::runtime_error("Ã‰chec envoi DRONE_AUTH");
         }
         
         // ------------------------------------------------------------
@@ -796,11 +967,11 @@ bool DroneNetworkClient::handshake() {
         logger->info("[5/5] Authentification Serveur");
         std::vector<uint8_t> server_auth_data = receive_message();
         if (server_auth_data.empty()) {
-            throw std::runtime_error("Pas de BlockServerAuth reçu");
+            throw std::runtime_error("Pas de BlockServerAuth reÃ§u");
         }
         
         BlockServerAuth server_auth = Serializer::deserialize_server_auth(server_auth_data);
-        logger->info("✓ SERVER_AUTH validé");
+        logger->info("âœ“ SERVER_AUTH validÃ©");
         std::vector<uint8_t> encrypted_msg = drone->handle_server_auth(server_auth);
         
         // ------------------------------------------------------------
@@ -810,16 +981,21 @@ bool DroneNetworkClient::handshake() {
         std::vector<uint8_t> confirm = drone->build_confirm();
         
         if (!send_message(confirm, "CONFIRM")) {
-            throw std::runtime_error("Échec envoi CONFIRM");
+            throw std::runtime_error("Ã‰chec envoi CONFIRM");
         }
         
-        logger->info("✓ CONFIRM envoyé");
+        logger->info("âœ“ CONFIRM envoyÃ©");
         
-        // Attendre réponse finale
+        // Attendre rÃ©ponse finale
         std::vector<uint8_t> resp = receive_message();
+        if (resp.empty()) {
+            throw std::runtime_error("Pas d'ACK CONFIRM reÃ§u");
+        }
+        drone->finalize_confirm_ok(resp);
+        logger->info("âœ“ CONFIRM ACK reÃ§u");
         
         logger->info("============================================================");
-        logger->info("✓ SESSION HESIA ÉTABLIE");
+        logger->info("âœ“ SESSION HESIA Ã‰TABLIE");
         logger->info("  Drone ID: " + drone->get_drone_id());
         logger->info("============================================================");
 
@@ -829,7 +1005,7 @@ bool DroneNetworkClient::handshake() {
         
         return true;
     } catch (const std::exception& e) {
-        logger->error("✗ Échec handshake: " + std::string(e.what()));
+        logger->error("âœ— Ã‰chec handshake: " + std::string(e.what()));
         if (audit) {
             audit->event("HANDSHAKE_FAIL", "ERROR", "err=" + std::string(e.what()));
         }
@@ -839,18 +1015,16 @@ bool DroneNetworkClient::handshake() {
 
 void DroneNetworkClient::send_secure_ping() {
     try {
-        logger->info("📤 Envoi message sécurisé PING #" + std::to_string(ping_counter));
+        logger->info("ðŸ“¤ Envoi message sÃ©curisÃ© PING #" + std::to_string(ping_counter));
         
         std::stringstream json_data;
-        json_data << "{\"timestamp\":\"" << std::time(nullptr) << "\",\"drone_id\":\"" 
+        json_data << "{\"timestamp\":\"" << std::time(nullptr) << "\",\"drone_id\":\""
                   << drone->get_drone_id() << "\",\"counter\":" << ping_counter << "}";
-        
-        std::vector<uint8_t> msg = drone->send_secure_message("PING", json_data.str());
-        
+
         ping_counter++;
-        
-        if (!enqueue_message(std::move(msg), "SECURE_MSG")) {
-            logger->error("Échec envoi ping (queue full)");
+
+        if (!enqueue_secure_message("PING", json_data.str())) {
+            logger->error("Ã‰chec envoi ping (queue full)");
             return;
         }
     } catch (const std::exception& e) {
@@ -878,12 +1052,11 @@ void DroneNetworkClient::send_secure_telemetry() {
                   << ",\"gps_alt_m\":" << t.gps_alt_m
                   << "}";
 
-        std::vector<uint8_t> msg = drone->send_secure_message("TELEMETRY", json_data.str());
-        if (!enqueue_message(std::move(msg), "SECURE_MSG")) {
-            logger->warning("Échec envoi TELEMETRY (queue full)");
+        if (!enqueue_secure_message("TELEMETRY", json_data.str())) {
+            logger->warning("Ã‰chec envoi TELEMETRY (queue full)");
             return;
         }
-        logger->debug("✅ TELEMETRY envoyée");
+        logger->debug("âœ… TELEMETRY envoyÃ©e");
     } catch (const std::exception& e) {
         logger->warning("Erreur TELEMETRY: " + std::string(e.what()));
     }
@@ -918,22 +1091,22 @@ void DroneNetworkClient::close() {
     if (socket_fd != INVALID_SOCKET) {
         ::close_socket(socket_fd);
         socket_fd = INVALID_SOCKET;
-        logger->info("Connexion fermée");
+        logger->info("Connexion fermÃ©e");
     }
     connected.store(false);
 }
 
 bool DroneNetworkClient::init_video_pipeline() {
-    logger->info("Initialisation du pipeline vidéo...");
+    logger->info("Initialisation du pipeline vidÃ©o...");
     
     try {
         video_manager = std::make_unique<VideoManager>();
         
-        // YOLO avec paramètres optimisés
+        // YOLO avec paramÃ¨tres optimisÃ©s
         yolo_processor = std::make_unique<YOLOTrackerProcessor>(
             0,    // GPU ID
-            10,   // max_objects (augmenté)
-            0.25f, // conf_threshold (baissé pour plus de détections)
+            10,   // max_objects (augmentÃ©)
+            0.25f, // conf_threshold (baissÃ© pour plus de dÃ©tections)
             0.45f, // nms_iou_threshold
             0.35f, // tracker_iou_thr
             5     // tracker_max_lost
@@ -942,7 +1115,7 @@ bool DroneNetworkClient::init_video_pipeline() {
         // MiDaS
         try {
             midas_processor = std::make_unique<MiDaSProcessor>(0);
-            logger->info("✓ MiDaS initialisé");
+            logger->info("âœ“ MiDaS initialisÃ©");
         } catch (const std::exception& e) {
             logger->warning("MiDaS non disponible: " + std::string(e.what()));
             midas_processor.reset();
@@ -953,20 +1126,20 @@ bool DroneNetworkClient::init_video_pipeline() {
         video_running = true;
         video_thread = std::thread(&DroneNetworkClient::video_processing_loop, this);
         
-        logger->info("✓ Pipeline vidéo initialisé");
+        logger->info("âœ“ Pipeline vidÃ©o initialisÃ©");
         logger->info("  YOLO: " + std::string(yolo_processor ? "ACTIF" : "INACTIF"));
         logger->info("  MiDaS: " + std::string(midas_processor ? "ACTIF" : "INACTIF"));
         
         return true;
     } catch (const std::exception& e) {
         error_handler->handle_exception(e, ErrorSeverity::ERROR, ErrorCategory::VIDEO, "init_video_pipeline");
-        logger->error("Échec initialisation pipeline: " + std::string(e.what()));
+        logger->error("Ã‰chec initialisation pipeline: " + std::string(e.what()));
         return false;
     }
 }
 
 void DroneNetworkClient::video_processing_loop() {
-    logger->info("Démarrage du flux vidéo...");
+    logger->info("DÃ©marrage du flux vidÃ©o...");
     
     try {
         using clock = std::chrono::steady_clock;
@@ -977,10 +1150,10 @@ void DroneNetworkClient::video_processing_loop() {
         while (video_running && connected.load()) {
             auto loop_start = clock::now();
             
-            // Récupérer une frame
+            // RÃ©cupÃ©rer une frame
             auto [ret, frame] = video_manager->get_frame();
             if (!ret || frame.empty()) {
-                logger->info("Fin du flux vidéo");
+                logger->info("Fin du flux vidÃ©o");
                 break;
             }
             
@@ -989,7 +1162,7 @@ void DroneNetworkClient::video_processing_loop() {
             // Traitement YOLO
             auto [yolo_frame, tracked, depthstate, selected] = yolo_processor->process(frame_id, frame);
             
-            // Convertir les détections
+            // Convertir les dÃ©tections
             std::vector<std::vector<float>> detections;
             for (const auto& [tid, det] : tracked) {
                 detections.push_back({det.x1, det.y1, det.x2, det.y2, 
@@ -1027,16 +1200,16 @@ void DroneNetworkClient::video_processing_loop() {
             }
             video_manager->receive_midas_result(frame_id, midas_frame);
             
-            // Envoyer via canal vidéo
+            // Envoyer via canal vidÃ©o
             VideoChannel* video_channel = drone->get_video_channel();
-            logger->debug("Vérification canal vidéo: " + std::string(video_channel ? "DISPONIBLE" : "NON DISPONIBLE"));
+            logger->debug("VÃ©rification canal vidÃ©o: " + std::string(video_channel ? "DISPONIBLE" : "NON DISPONIBLE"));
             
             
             if (video_channel) {
                 send_video_frame(yolo_frame, midas_frame, frame_id);
                 stats.video_frames_sent.fetch_add(1);
             } else {
-                logger->warning("Canal vidéo non disponible - frame non envoyée au serveur");
+                logger->warning("Canal vidÃ©o non disponible - frame non envoyÃ©e au serveur");
             }
             
             auto now = clock::now();
@@ -1059,7 +1232,7 @@ void DroneNetworkClient::video_processing_loop() {
                            " - YOLO: " + std::to_string(tracked.size()) + " objets");
             }
             
-            // Contrôle FPS
+            // ContrÃ´le FPS
             auto loop_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 clock::now() - loop_start).count();
             
@@ -1070,16 +1243,16 @@ void DroneNetworkClient::video_processing_loop() {
     } catch (const std::exception& e) {
         error_handler->handle_exception(e, ErrorSeverity::ERROR, ErrorCategory::VIDEO, "video_processing_loop");
     }
-    logger->info("Flux vidéo terminé");
+    logger->info("Flux vidÃ©o terminÃ©");
 }
 
 void DroneNetworkClient::stop_video() {
-    logger->info("Arrêt du pipeline vidéo...");
+    logger->info("ArrÃªt du pipeline vidÃ©o...");
     
-    // Arrêter le pipeline clean
+    // ArrÃªter le pipeline clean
     stop_clean_pipeline();
     
-    // Arrêter l'ancien pipeline
+    // ArrÃªter l'ancien pipeline
     workers_running = false;
     video_running = false;
     
@@ -1097,7 +1270,7 @@ void DroneNetworkClient::stop_video() {
         frame_buffer_pool.clear();
     }
     
-    logger->info("Pipeline vidéo arrêté");
+    logger->info("Pipeline vidÃ©o arrÃªtÃ©");
 }
 
 void DroneNetworkClient::print_stats() {
@@ -1109,17 +1282,17 @@ void DroneNetworkClient::print_stats() {
         logger->info("============================================================");
         logger->info("STATISTIQUES");
         logger->info("============================================================");
-        logger->info("Durée: " + std::to_string(seconds) + " secondes");
-        logger->info("Octets envoyés: " + std::to_string(stats.bytes_sent.load()));
-        logger->info("Octets reçus: " + std::to_string(stats.bytes_received.load()));
-        logger->info("Messages envoyés: " + std::to_string(stats.messages_sent.load()));
-        logger->info("Messages reçus: " + std::to_string(stats.messages_received.load()));
-        logger->info("Frames vidéo envoyées: " + std::to_string(stats.video_frames_sent.load()));
+        logger->info("DurÃ©e: " + std::to_string(seconds) + " secondes");
+        logger->info("Octets envoyÃ©s: " + std::to_string(stats.bytes_sent.load()));
+        logger->info("Octets reÃ§us: " + std::to_string(stats.bytes_received.load()));
+        logger->info("Messages envoyÃ©s: " + std::to_string(stats.messages_sent.load()));
+        logger->info("Messages reÃ§us: " + std::to_string(stats.messages_received.load()));
+        logger->info("Frames vidÃ©o envoyÃ©es: " + std::to_string(stats.video_frames_sent.load()));
         logger->info("============================================================");
     }
 }
 
-void DroneNetworkClient::main() {
+int DroneNetworkClient::main() {
     std::string HOST = policy_.server_host.empty() ? std::string("127.0.0.1") : policy_.server_host;
     int PORT = policy_.server_port > 0 ? policy_.server_port : 9000;
 
@@ -1128,19 +1301,19 @@ void DroneNetworkClient::main() {
         if (audit) {
             audit->event("INCIDENT_MODE", "ERROR", "drone refusing to connect");
         }
-        return;
+        return 1;
     }
 
     try {
         // Connexion
         if (!connect(HOST, PORT)) {
-            return;
+            return 1;
         }
         
         // Handshake
         if (!handshake()) {
-            logger->error("Handshake échoué");
-            return;
+            logger->error("Handshake Ã©chouÃ©");
+            return 1;
         }
 
         // Start async sender (prevents pipeline stalls on slow TLS writes)
@@ -1152,7 +1325,7 @@ void DroneNetworkClient::main() {
         telemetry_thread = std::thread(&DroneNetworkClient::telemetry_loop, this);
         
         // Initialiser le pipeline clean (remplace l'ancien pipeline)
-        logger->info("🔄 Initialisation du CleanPipeline après handshake...");
+        logger->info("ðŸ”„ Initialisation du CleanPipeline aprÃ¨s handshake...");
         init_clean_pipeline();
         
         // Envoyer des messages de test
@@ -1160,51 +1333,56 @@ void DroneNetworkClient::main() {
         
         send_secure_ping();
         
-        // Messages supplémentaires
+        // Messages supplÃ©mentaires
         try {
             std::stringstream flight_data;
             flight_data << "{\"altitude\":120.5,\"battery\":87,\"speed\":15.2,\"heading\":270}";
-            std::vector<uint8_t> msg = drone->send_secure_message("FLIGHT_DATA", flight_data.str());
-            enqueue_message(std::move(msg), "SECURE_MSG");
+            enqueue_secure_message("FLIGHT_DATA", flight_data.str());
         } catch (const std::exception& e) {
             logger->warning("Erreur FLIGHT_DATA: " + std::string(e.what()));
         }
         
-        // Main loop pour surveiller le pipeline vidéo
+        // Main loop pour surveiller le pipeline vidÃ©o
         auto video_start = std::chrono::steady_clock::now();
         while (video_running && connected.load()) {
             auto now = std::chrono::steady_clock::now();
             
-            // Vérifications runtime
-            // if (!RuntimeProtection::check_honeypot_triggers()) { // Commenté pour éviter erreur
-            //     logger->error("⚠️ Honeypot déclenché - Attaque détectée");
+            // VÃ©rifications runtime
+            // if (!RuntimeProtection::check_honeypot_triggers()) { // CommentÃ© pour Ã©viter erreur
+            //     logger->error("âš ï¸ Honeypot dÃ©clenchÃ© - Attaque dÃ©tectÃ©e");
             //     RuntimeProtection::emergency_shutdown();
             //     break;
             // }
             
-            // Vérification basique remplacée
-            if (false) { // Placeholder pour vérification honeypot
-                logger->warning("Vérification honeypot désactivée pour compilation");
+            // VÃ©rification basique remplacÃ©e
+            if (false) { // Placeholder pour vÃ©rification honeypot
+                logger->warning("VÃ©rification honeypot dÃ©sactivÃ©e pour compilation");
             }
             
+            if (!RuntimeProtection::check_honeypot_triggers()) {
+                logger->error("Honeypot declenche ou altere");
+                RuntimeProtection::emergency_shutdown();
+                break;
+            }
+
             if (!RuntimeProtection::self_healing_check()) {
-                logger->warning("⚠️ Auto-réparation requise");
+                logger->warning("âš ï¸ Auto-rÃ©paration requise");
             }
             
-            logger->debug("✅ Vérifications sécurité OK");
+            logger->debug("âœ… VÃ©rifications sÃ©curitÃ© OK");
 
             // Afficher un message toutes les 10 secondes
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - video_start).count();
             
             if (elapsed % 10 == 0 && elapsed > 0) {
-                logger->info("Pipeline sécurisé en cours depuis " + std::to_string(elapsed) + " secondes");
+                logger->info("Pipeline sÃ©curisÃ© en cours depuis " + std::to_string(elapsed) + " secondes");
                 
-                // Afficher l'état des protections
+                // Afficher l'Ã©tat des protections
                 auto attestation = RuntimeProtection::generate_attestation_report();
-                logger->debug("🛡️ Attestation runtime: " + std::to_string(attestation.size()) + " bytes");
+                logger->debug("ðŸ›¡ï¸ Attestation runtime: " + std::to_string(attestation.size()) + " bytes");
             }
             
-            // Attendre un peu avant la prochaine vérification
+            // Attendre un peu avant la prochaine vÃ©rification
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         
@@ -1221,10 +1399,12 @@ void DroneNetworkClient::main() {
         
     } catch (const std::exception& e) {
         logger->error("Erreur: " + std::string(e.what()));
+        transport_failed_.store(true);
     }
     
     stop_video();
     close();
+    return transport_failed_.load() ? 1 : 0;
 }
 
 cv::Mat DroneNetworkClient::get_pooled_frame() {
@@ -1250,39 +1430,39 @@ void DroneNetworkClient::init_clean_pipeline() {
     if (!clean_pipeline) {
         clean_pipeline = std::make_unique<CleanPipeline>();
         
-        // Configurer les GPU (utiliser GPU 0 par dÃ©faut)
+        // Configurer les GPU (utiliser GPU 0 par dÃƒÂ©faut)
         clean_pipeline->set_gpu_ids(0, 0);
         
-        // Configurer le callback pour envoyer les frames traitÃ©es
+        // Configure the callback that forwards processed frames to the server.
         clean_pipeline->set_frame_callback([this](const cv::Mat& yolo_frame, const cv::Mat& midas_frame, int frame_id) {
             if (video_log_enabled && (frame_id % video_log_every_n == 0)) {
-            logger->info("[CALLBACK] ðŸŽ¬ CleanPipeline callback appelÃ© pour frame " + std::to_string(frame_id));
+                logger->info("[CALLBACK] CleanPipeline callback for frame " + std::to_string(frame_id));
             }
-            
-            
-            // Envoyer la frame au serveur via le rÃ©seau
+
+            // Send the processed frame to the server.
             send_video_frame(yolo_frame, midas_frame, frame_id);
-            
-            // Mettre Ã  jour les statistiques
+
+            // Update counters without spamming the logs on every frame.
             stats.video_frames_sent.fetch_add(1);
-            
-            logger->info("[CALLBACK] âœ“ Frame " + std::to_string(frame_id) + " traitÃ©e via callback");
+            if (video_log_enabled && (frame_id % video_log_every_n == 0)) {
+                logger->info("[CALLBACK] Frame " + std::to_string(frame_id) + " forwarded");
+            }
         });
         
         if (!clean_pipeline->start()) {
-            throw std::runtime_error("Impossible de dÃ©marrer le CleanPipeline");
+            throw std::runtime_error("Impossible de demarrer le CleanPipeline");
         }
         
-        logger->info("CleanPipeline dÃ©marrÃ© avec succÃ¨s avec callback rÃ©seau");
+        logger->info("CleanPipeline demarre avec succes avec callback reseau");
     }
 }
 
 void DroneNetworkClient::stop_clean_pipeline() {
     if (clean_pipeline) {
-        logger->info("ArrÃªt du CleanPipeline...");
+        logger->info("Arret du CleanPipeline...");
         clean_pipeline->stop();
         clean_pipeline.reset();
-        logger->info("CleanPipeline arrÃªtÃ©");
+        logger->info("CleanPipeline arrete");
     }
 }
 
@@ -1293,7 +1473,7 @@ CleanPipeline::PipelineStats DroneNetworkClient::get_clean_pipeline_stats() cons
     return CleanPipeline::PipelineStats{};
 }
 
-// ImplÃ©mentation de la fonction send_video_frame
+// ImplÃƒÂ©mentation de la fonction send_video_frame
 void DroneNetworkClient::send_video_frame(const cv::Mat& yolo_frame, const cv::Mat& midas_frame, int frame_id) {
     try {
         if (!connected.load() || socket_fd == INVALID_SOCKET) {
@@ -1304,9 +1484,20 @@ void DroneNetworkClient::send_video_frame(const cv::Mat& yolo_frame, const cv::M
         const bool verbose = video_log_enabled && (frame_id % video_log_every_n == 0);
         {
             std::lock_guard<std::mutex> lock(send_queue_mutex);
+            if (policy_.video_min_send_interval_ms > 0) {
+                const auto now = std::chrono::steady_clock::now();
+                if (last_video_enqueue_tp_.time_since_epoch().count() != 0 &&
+                    now - last_video_enqueue_tp_ <
+                        std::chrono::milliseconds(policy_.video_min_send_interval_ms)) {
+                    return;
+                }
+                last_video_enqueue_tp_ = now;
+            }
             if (send_queue.size() >= send_queue_max) {
+                ++dropped_video_frames_;
                 if (verbose) {
-                    logger->warning("[VIDEO] Drop frame (send queue full) #" + std::to_string(frame_id));
+                    logger->warning("[VIDEO] Drop frame (send queue full) #" + std::to_string(frame_id) +
+                                    " depth=" + std::to_string(send_queue.size()));
                 }
                 return;
             }
@@ -1378,7 +1569,7 @@ void DroneNetworkClient::send_video_frame(const cv::Mat& yolo_frame, const cv::M
                 logger->error("[VIDEO] ?chec envoi frame #" + std::to_string(frame_id));
             } else if (verbose) {
                 logger->info("[VIDEO] ? Frame #" + std::to_string(frame_id) +
-                            " envoy?e avec succ?s (" + std::to_string(jpeg_buffer.size()) + " bytes)");
+                            " mise en file avec succ?s (" + std::to_string(jpeg_buffer.size()) + " bytes)");
             }
         } else {
             logger->error("VideoChannel non disponible pour l'envoi");
@@ -1402,4 +1593,5 @@ void DroneNetworkClient::log_combined_frame(const cv::Mat& yolo_frame, const cv:
     return;
 }
 } // namespace hesia
+
 

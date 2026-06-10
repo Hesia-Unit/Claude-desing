@@ -1,13 +1,15 @@
-#include "policy.hpp"
+#include "../include/policy.hpp"
 #include "policy_ed25519_public_key.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <openssl/evp.h>
@@ -20,6 +22,8 @@ namespace {
 #ifndef HESIA_POLICY_DIR
 #define HESIA_POLICY_DIR "/etc/hesia/policy"
 #endif
+
+constexpr int kPolicySchemaVersion = 1;
 
 static std::string trim_copy(const std::string& s) {
     size_t start = 0;
@@ -148,18 +152,175 @@ static std::unordered_map<std::string, std::string> parse_kv(const std::string& 
     std::unordered_map<std::string, std::string> out;
     std::istringstream iss(content);
     std::string line;
+    size_t line_no = 0;
     while (std::getline(iss, line)) {
+        ++line_no;
         std::string t = trim_copy(line);
         if (t.empty() || t[0] == '#') continue;
         auto pos = t.find('=');
-        if (pos == std::string::npos) continue;
+        if (pos == std::string::npos) {
+            throw std::runtime_error("Invalid security policy line " + std::to_string(line_no) +
+                                     ": missing '='");
+        }
         std::string key = trim_copy(t.substr(0, pos));
         std::string val = trim_copy(t.substr(pos + 1));
-        if (!key.empty()) {
-            out[key] = val;
+        if (key.empty()) {
+            throw std::runtime_error("Invalid security policy line " + std::to_string(line_no) +
+                                     ": empty key");
+        }
+        if (!out.emplace(key, val).second) {
+            throw std::runtime_error("Duplicate security policy key: " + key);
         }
     }
     return out;
+}
+
+static const std::unordered_set<std::string>& allowed_policy_keys() {
+    static const std::unordered_set<std::string> allowed = []() {
+        static constexpr std::array<const char*, 58> suffixes = {
+            "version",
+            "require_mtls",
+            "require_attestation",
+            "prod_fuse",
+            "incident_mode",
+            "require_exporter_binding",
+            "require_tee_hkdf",
+            "require_tee_attestation",
+            "require_optee_session_auth",
+            "require_mldsa_sign_in_tee",
+            "allow_ephemeral_dilithium",
+            "allow_ephemeral_puf",
+            "ssl_read_timeout_sec",
+            "ssl_write_timeout_sec",
+            "server_host",
+            "server_port",
+            "max_control_msg_bytes",
+            "max_frame_bytes",
+            "video_send_queue_max",
+            "video_min_send_interval_ms",
+            "rate_limit_bps",
+            "rate_limit_burst",
+            "tls_pin",
+            "tls_rekey_bytes",
+            "tls_rekey_seconds",
+            "secure_dir",
+            "sealed_puf_path",
+            "sealed_dilithium_path",
+            "optee_session_auth_path",
+            "require_oem_kdf",
+            "oem_k1_path",
+            "oem_k2_path",
+            "oem_kdf_label",
+            "oem_kdf_context",
+            "firmware_version",
+            "firmware_version_file",
+            "require_boot_measure",
+            "boot_measure_path",
+            "boot_measure_sig_path",
+            "boot_measure_pubkey_path",
+            "boot_measure_format",
+            "boot_measure_expected_source",
+            "boot_measure_max_age_sec",
+            "require_asset_manifest",
+            "asset_manifest_path",
+            "asset_manifest_sig_path",
+            "asset_manifest_pubkey_path",
+            "asset_manifest_format",
+            "asset_manifest_expected_slot",
+            "asset_manifest_max_age_sec",
+            "require_ab_slots",
+            "require_rpmb_rollback_storage",
+            "require_release_signature",
+            "release_target_path",
+            "release_sig_path",
+            "release_pubkey_path",
+            "audit_enabled",
+            "audit_log_path"
+        };
+        static constexpr std::array<const char*, 9> more_suffixes = {
+            "audit_key_path",
+            "audit_alert_path",
+            "audit_signing_key",
+            "audit_signing_pub",
+            "audit_export_path",
+            "require_audit_signing",
+            "audit_rotate_on_start",
+            "audit_rotate_interval_sec",
+            "cert_dir"
+        };
+        static constexpr std::array<const char*, 14> final_suffixes = {
+            "client_cert",
+            "client_key",
+            "ca_cert",
+            "bind_addr",
+            "port",
+            "server_cert",
+            "server_key",
+            "keys_dir",
+            "drone_pubkey_file",
+            "drone_tee_pubkey_file",
+            "require_pinned_drone_pubkey",
+            "forensic_dir",
+            "ui_dir",
+            "require_boot_measure_allowlist"
+        };
+        static constexpr std::array<const char*, 4> server_limits = {
+            "max_conn_total",
+            "max_conn_per_ip",
+            "max_pending_queue",
+            "worker_threads"
+        };
+
+        std::unordered_set<std::string> out;
+        out.insert("schema_version");
+        for (const char* suffix : suffixes) {
+            out.insert(suffix);
+            out.insert(std::string("drone.") + suffix);
+            out.insert(std::string("server.") + suffix);
+        }
+        for (const char* suffix : more_suffixes) {
+            out.insert(suffix);
+            out.insert(std::string("drone.") + suffix);
+            out.insert(std::string("server.") + suffix);
+        }
+        for (const char* suffix : final_suffixes) {
+            out.insert(suffix);
+            out.insert(std::string("drone.") + suffix);
+            out.insert(std::string("server.") + suffix);
+        }
+        for (const char* suffix : server_limits) {
+            out.insert(suffix);
+            out.insert(std::string("server.") + suffix);
+        }
+        return out;
+    }();
+    return allowed;
+}
+
+static void validate_policy_kv_or_throw(const std::unordered_map<std::string, std::string>& kv) {
+    const auto& allowed = allowed_policy_keys();
+    for (const auto& [key, _] : kv) {
+        if (allowed.find(key) == allowed.end()) {
+            throw std::runtime_error("Unsupported security policy key: " + key);
+        }
+    }
+
+    const auto schema_it = kv.find("schema_version");
+    if (schema_it == kv.end()) {
+        throw std::runtime_error("Security policy schema_version missing");
+    }
+
+    int schema_version = 0;
+    try {
+        schema_version = std::stoi(schema_it->second);
+    } catch (...) {
+        throw std::runtime_error("Invalid security policy schema_version: " + schema_it->second);
+    }
+
+    if (schema_version != kPolicySchemaVersion) {
+        throw std::runtime_error("Unsupported security policy schema_version: " +
+                                 std::to_string(schema_version));
+    }
 }
 
 static std::string get_key(const std::unordered_map<std::string, std::string>& kv,
@@ -246,10 +407,15 @@ SecurityPolicy load_security_policy_or_throw(const std::string& role) {
     }
 
     auto kv = parse_kv(policy_text);
+    validate_policy_kv_or_throw(kv);
+
+    p.schema_version = get_int(kv, role, "schema_version", p.schema_version);
 
     p.version = get_int(kv, role, "version", p.version);
     p.require_mtls = get_bool(kv, role, "require_mtls", p.require_mtls);
     p.require_attestation = get_bool(kv, role, "require_attestation", p.require_attestation);
+    p.require_tee_attestation = get_bool(kv, role, "require_tee_attestation", p.require_tee_attestation);
+    p.require_boot_measure_allowlist = get_bool(kv, role, "require_boot_measure_allowlist", p.require_boot_measure_allowlist);
     p.prod_fuse = get_bool(kv, role, "prod_fuse", p.prod_fuse);
     p.incident_mode = get_bool(kv, role, "incident_mode", p.incident_mode);
 
@@ -277,6 +443,7 @@ SecurityPolicy load_security_policy_or_throw(const std::string& role) {
     p.keys_dir = get_key(kv, role, "keys_dir", p.keys_dir);
     p.secure_dir = get_key(kv, role, "secure_dir", p.secure_dir);
     p.drone_pubkey_file = get_key(kv, role, "drone_pubkey_file", p.drone_pubkey_file);
+    p.drone_tee_pubkey_file = get_key(kv, role, "drone_tee_pubkey_file", p.drone_tee_pubkey_file);
     p.require_pinned_drone_pubkey = get_bool(kv, role, "require_pinned_drone_pubkey", p.require_pinned_drone_pubkey);
 
     p.forensic_dir = get_key(kv, role, "forensic_dir", p.forensic_dir);

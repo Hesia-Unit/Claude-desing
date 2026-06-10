@@ -1,0 +1,42 @@
+#include <tunables/global>
+
+/opt/hesia/bin/hesia_server_cpp flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/openssl>
+
+  network inet stream,
+  network inet6 stream,
+  network unix stream,
+  network unix dgram,
+
+  capability chown,
+  capability dac_override,
+  capability fowner,
+  capability setgid,
+  capability setuid,
+
+  /opt/hesia/bin/hesia_server_cpp mr,
+  /usr/lib/** mr,
+  /usr/local/lib/** mr,
+  /lib/** mr,
+  /lib64/** mr,
+
+  /etc/hesia/ r,
+  /etc/hesia/** rk,
+  /var/lib/hesia/ rw,
+  /var/lib/hesia/** rwk,
+  /var/log/hesia/ rw,
+  /var/log/hesia/** rwk,
+
+  /dev/tee0 rw,
+  /dev/teepriv0 rw,
+
+  /proc/** r,
+  /sys/** r,
+
+  deny /etc/shadow r,
+  deny /root/** rwklx,
+  deny /home/** rwklx,
+  deny /tmp/** mx,
+}

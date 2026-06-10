@@ -21,11 +21,19 @@ namespace hesia {
 class SecureMemory {
 public:
     static void zeroize(void* ptr, size_t len);
+    static bool protect(void* ptr, size_t len);
+    static void unprotect(void* ptr, size_t len);
     // Wipe without changing the vector size/capacity.
     static void wipe(std::vector<uint8_t>& data);
+    // Wipe a string in-place before clearing it.
+    static void zeroize(std::string& data);
     // Wipe then clear() the vector (size becomes 0). Prefer wipe() when the
     // caller still needs the buffer size.
     static void zeroize(std::vector<uint8_t>& data);
+    static bool protect(std::vector<uint8_t>& data);
+    static bool protect(std::string& data);
+    static void unprotect(std::vector<uint8_t>& data);
+    static void unprotect(std::string& data);
 
     // Copy helper (kept here because several components use SecureMemory::*).
     static void copy(void* dst, const void* src, size_t len);

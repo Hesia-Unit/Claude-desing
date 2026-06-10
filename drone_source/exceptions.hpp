@@ -47,6 +47,12 @@ public:
         : HesiaException(msg) {}
 };
 
+class CryptoInitError : public CryptoError {
+public:
+    CryptoInitError(const std::string& msg = "Initialisation cryptographique impossible")
+        : CryptoError(msg) {}
+};
+
 class InvalidSignature : public CryptoError {
 public:
     InvalidSignature(const std::string& msg = "Signature invalide (Dilithium)")
@@ -124,4 +130,3 @@ public:
 } // namespace hesia
 
 #endif // EXCEPTIONS_HPP
-

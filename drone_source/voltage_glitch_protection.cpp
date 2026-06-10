@@ -188,6 +188,68 @@ std::string resolve_ina3221_voltage_path() {
 
     return {};
 }
+
+bool ensure_directory_if_possible(const std::filesystem::path& dir) {
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return !ec;
+}
+
+bool can_open_append_file(const std::filesystem::path& path) {
+    const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0640);
+    if (fd < 0) {
+        return false;
+    }
+    close(fd);
+    return true;
+}
+
+bool append_text_file_best_effort(const std::filesystem::path& path, const std::string& content) {
+    const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0640);
+    if (fd < 0) {
+        return false;
+    }
+    const ssize_t written = write(fd, content.data(), content.size());
+    close(fd);
+    return written == static_cast<ssize_t>(content.size());
+}
+
+bool write_text_file_best_effort(const std::filesystem::path& path, const std::string& content) {
+    const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0640);
+    if (fd < 0) {
+        return false;
+    }
+    const ssize_t written = write(fd, content.data(), content.size());
+    close(fd);
+    return written == static_cast<ssize_t>(content.size());
+}
+
+std::string select_voltage_log_dir() {
+    const std::vector<std::string> candidates = {
+        hesia::Config::LOG_DIR,
+        "/var/log/hesia/drone",
+        "/var/log/hesia",
+        "/tmp/hesia"
+    };
+
+    for (const auto& candidate : candidates) {
+        if (candidate.empty()) {
+            continue;
+        }
+        const std::filesystem::path dir(candidate);
+        if (!ensure_directory_if_possible(dir)) {
+            continue;
+        }
+        const std::filesystem::path test_file = dir / ".hesia_voltage_write_test";
+        if (can_open_append_file(test_file)) {
+            std::error_code ec;
+            std::filesystem::remove(test_file, ec);
+            return dir.string();
+        }
+    }
+
+    return "/tmp";
+}
 #endif
 } // namespace
 
@@ -197,14 +259,14 @@ namespace hesia {
 
 std::atomic<bool> VoltageGlitchProtection::glitch_monitor_active{false};
 std::vector<VoltageGlitchProtection::VoltageGlitchSample> VoltageGlitchProtection::glitch_history;
-std::mutex VoltageGlitchProtection::glitch_history_mutex; // ✅ P2: Initialisation du mutex
+std::mutex VoltageGlitchProtection::glitch_history_mutex; // ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ P2: Initialisation du mutex
 std::thread VoltageGlitchProtection::monitoring_thread;
 std::atomic<uint32_t> VoltageGlitchProtection::glitch_count{0};
 std::atomic<uint32_t> VoltageGlitchProtection::clamping_events{0};
 std::atomic<bool> VoltageGlitchProtection::voltage_sensor_available{false};
 
 std::atomic<double> VoltageGlitchProtection::nominal_voltage{3.3}; // 3.3V typique
-std::atomic<double> VoltageGlitchProtection::glitch_threshold_percent{10.0}; // 10% de tolérance
+std::atomic<double> VoltageGlitchProtection::glitch_threshold_percent{10.0}; // 10% de tolÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©rance
 std::atomic<uint32_t> VoltageGlitchProtection::clamping_threshold_mv{100}; // 100mV
 std::atomic<bool> VoltageGlitchProtection::voltage_clamping_active{false};
 std::atomic<bool> VoltageGlitchProtection::watchdog_active{false};
@@ -217,7 +279,7 @@ std::string VoltageGlitchProtection::voltage_log_path = "/var/log/hesia/hesia_vo
 // ===== FONCTIONS DE MONITORING =====
 
 bool VoltageGlitchProtection::initialize(double nominal_voltage_v) {
-    std::cout << "⚡ Initialisation VoltageGlitchProtection..." << std::endl;
+    std::cout << "ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¡ Initialisation VoltageGlitchProtection..." << std::endl;
     
     nominal_voltage = nominal_voltage_v;
     glitch_count = 0;
@@ -250,51 +312,47 @@ bool VoltageGlitchProtection::initialize(double nominal_voltage_v) {
     clamping_events = 0;
     glitch_history.clear();
     
-    // Configuration par défaut
-    glitch_threshold_percent = 10.0; // 10% de tolérance
+    // Configuration par dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©faut
+    glitch_threshold_percent = 10.0; // 10% de tolÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©rance
     clamping_threshold_mv = 100; // 100mV de seuil
     voltage_clamping_active = false;
     watchdog_active = false;
     
-    // ✅ SÉCURITÉ: Création répertoire sécurisée (P0) - Pas de system()
+    // ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ SÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°CURITÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°: CrÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©ation rÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©pertoire sÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©curisÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©e (P0) - Pas de system()
     // Utiliser mkdir() direct avec permissions restrictives
     if (mkdir("/var/log/hesia", 0750) != 0 && errno != EEXIST) {
-        std::cerr << "⚠️ Impossible de créer /var/log/hesia: " << strerror(errno) << std::endl;
-        // Continuer quand même - les logs sont optionnels
+        std::cerr << "ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â Impossible de crÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©er /var/log/hesia: " << strerror(errno) << std::endl;
+        // Continuer quand mÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Âªme - les logs sont optionnels
     }
     
-    // ✅ SÉCURITÉ: Ouverture fichier sécurisée avec O_NOFOLLOW
-    int log_fd = open(voltage_log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0640);
-    if (log_fd >= 0) {
-        const char* init_msg = "=== VoltageGlitchProtection Initialisé ===\n";
-        (void)write(log_fd, init_msg, strlen(init_msg));
-        
-        char msg[256];
-        int len = snprintf(msg, sizeof(msg), "Nominal voltage: %.2fV\n", nominal_voltage.load());
-        if (len > 0) {
-            (void)write(log_fd, msg, len);
-        }
-        
-        close(log_fd);
-    } else {
-        std::cerr << "⚠️ Impossible d'ouvrir le fichier de log voltage: " << strerror(errno) << std::endl;
+    // ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ SÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°CURITÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°: Ouverture fichier sÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©curisÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©e avec O_NOFOLLOW
+    const std::string log_dir = select_voltage_log_dir();
+    clamping_status_path = (std::filesystem::path(log_dir) / "hesia_voltage_clamping.status").string();
+    watchdog_status_path = (std::filesystem::path(log_dir) / "hesia_voltage_watchdog.status").string();
+    voltage_log_path = (std::filesystem::path(log_dir) / "hesia_voltage_glitch.log").string();
+    std::ostringstream init_log;
+    init_log << "=== VoltageGlitchProtection Initialized ===\n";
+    init_log << "Nominal voltage: " << std::fixed << std::setprecision(2)
+             << nominal_voltage.load() << "V\n";
+    if (!append_text_file_best_effort(voltage_log_path, init_log.str())) {
+        std::cerr << "Voltage glitch log unavailable: " << strerror(errno) << std::endl;
     }
     
-    std::cout << "✅ VoltageGlitchProtection initialisé (nominal: " 
+    std::cout << "ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ VoltageGlitchProtection initialisÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â© (nominal: " 
               << nominal_voltage_v << "V)" << std::endl;
     return true;
 }
 
 bool VoltageGlitchProtection::start_voltage_glitch_monitoring() {
     if (glitch_monitor_active.load()) {
-        std::cout << "⚠️ Monitoring voltage glitch déjà actif" << std::endl;
+        std::cout << "ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â Monitoring voltage glitch dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©jÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â  actif" << std::endl;
         return true;
     }
     
     glitch_monitor_active = true;
     monitoring_thread = std::thread(voltage_glitch_monitoring_loop);
     
-    std::cout << "⚡ Monitoring voltage glitch démarré" << std::endl;
+    std::cout << "ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¡ Monitoring voltage glitch dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©marrÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©" << std::endl;
     return true;
 }
 
@@ -308,17 +366,17 @@ void VoltageGlitchProtection::stop_voltage_glitch_monitoring() {
         monitoring_thread.join();
     }
     
-    std::cout << "⚡ Monitoring voltage glitch arrêté" << std::endl;
+    std::cout << "ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¡ Monitoring voltage glitch arrÃƒÆ’Ã†â€™Ãƒâ€šÃ‚ÂªtÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©" << std::endl;
 }
 
 void VoltageGlitchProtection::voltage_glitch_monitoring_loop() {
-    std::cout << "🔄 Démarrage boucle monitoring voltage glitch..." << std::endl;
+    std::cout << "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ DÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©marrage boucle monitoring voltage glitch..." << std::endl;
     
     while (glitch_monitor_active.load()) {
         try {
             VoltageGlitchSample sample = read_voltage_sample();
             
-            // Ajouter à l'historique (protégé par mutex)
+            // Ajouter ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â  l'historique (protÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©gÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â© par mutex)
             {
                 std::lock_guard<std::mutex> lock(glitch_history_mutex);
                 glitch_history.push_back(sample);
@@ -327,7 +385,7 @@ void VoltageGlitchProtection::voltage_glitch_monitoring_loop() {
                 }
             }
             
-            // Détection de glitches
+            // DÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©tection de glitches
             if (detect_voltage_glitch(sample)) {
                 glitch_count++;
                 trigger_voltage_clamping();
@@ -335,14 +393,14 @@ void VoltageGlitchProtection::voltage_glitch_monitoring_loop() {
             }
             
         } catch (const std::exception& e) {
-            std::cerr << "❌ Erreur monitoring voltage glitch: " << e.what() << std::endl;
+            std::cerr << "ÃƒÆ’Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒâ€¦Ã¢â‚¬â„¢ Erreur monitoring voltage glitch: " << e.what() << std::endl;
         }
         
-        // Pause de 50ms entre les échantillons
+        // Pause de 50ms entre les ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©chantillons
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     
-    std::cout << "🔄 Boucle monitoring voltage glitch terminée" << std::endl;
+    std::cout << "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ Boucle monitoring voltage glitch terminÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©e" << std::endl;
 }
 
 VoltageGlitchProtection::VoltageGlitchSample VoltageGlitchProtection::read_voltage_sample() {
@@ -388,15 +446,15 @@ uint32_t VoltageGlitchProtection::read_voltage_duration() {
 bool VoltageGlitchProtection::detect_voltage_glitch(const VoltageGlitchSample& current) {
     bool glitch = false;
     
-    // Créer une copie modifiable pour la détection
+    // CrÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©er une copie modifiable pour la dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©tection
     VoltageGlitchSample modifiable_current = current;
     
-    // Vérifier si le voltage est anormal
+    // VÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©rifier si le voltage est anormal
     if (is_voltage_anomalous(modifiable_current.voltage_v)) {
         glitch = true;
         modifiable_current.glitch_detected = true;
         
-        // Déterminer le type de glitch
+        // DÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©terminer le type de glitch
         if (detect_under_voltage_glitch(modifiable_current)) {
             modifiable_current.glitch_type = GLITCH_UNDER_VOLTAGE;
         } else if (detect_over_voltage_glitch(modifiable_current)) {
@@ -417,7 +475,7 @@ bool VoltageGlitchProtection::detect_voltage_glitch(const VoltageGlitchSample& c
     return glitch;
 }
 
-// ===== DÉTECTION DE GLITCHS SPÉCIFIQUES =====
+// ===== DÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°TECTION DE GLITCHS SPÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°CIFIQUES =====
 
 bool VoltageGlitchProtection::detect_under_voltage_glitch(const VoltageGlitchSample& sample) {
     // Under-voltage: voltage trop bas
@@ -425,7 +483,7 @@ bool VoltageGlitchProtection::detect_under_voltage_glitch(const VoltageGlitchSam
     double threshold = nominal * (1.0 - glitch_threshold_percent.load() / 100.0);
     
     if (sample.voltage_v < threshold) {
-        std::cout << "🚨 Under-voltage glitch détecté! Voltage: " 
+        std::cout << "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¨ Under-voltage glitch dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©tectÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©! Voltage: " 
                   << sample.voltage_v << "V (threshold: " << threshold << "V)" << std::endl;
         return true;
     }
@@ -434,12 +492,12 @@ bool VoltageGlitchProtection::detect_under_voltage_glitch(const VoltageGlitchSam
 }
 
 bool VoltageGlitchProtection::detect_over_voltage_glitch(const VoltageGlitchSample& sample) {
-    // Over-voltage: voltage trop élevé
+    // Over-voltage: voltage trop ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©levÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©
     double nominal = nominal_voltage.load();
     double threshold = nominal * (1.0 + glitch_threshold_percent.load() / 100.0);
     
     if (sample.voltage_v > threshold) {
-        std::cout << "🚨 Over-voltage glitch détecté! Voltage: " 
+        std::cout << "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¨ Over-voltage glitch dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©tectÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©! Voltage: " 
                   << sample.voltage_v << "V (threshold: " << threshold << "V)" << std::endl;
         return true;
     }
@@ -448,7 +506,7 @@ bool VoltageGlitchProtection::detect_over_voltage_glitch(const VoltageGlitchSamp
 }
 
 bool VoltageGlitchProtection::detect_voltage_spike(const VoltageGlitchSample& sample) {
-    // Voltage spike: augmentation soudaine et brève
+    // Voltage spike: augmentation soudaine et brÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¨ve
     if (glitch_history.size() < 2) {
         return false;
     }
@@ -458,7 +516,7 @@ bool VoltageGlitchProtection::detect_voltage_spike(const VoltageGlitchSample& sa
     double time_diff = (sample.timestamp - previous.timestamp) / 1000000.0; // ms
     
     if (time_diff > 0 && voltage_change / time_diff > 100.0) { // 100V/ms
-        std::cout << "🚨 Voltage spike détecté! Changement: " 
+        std::cout << "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¨ Voltage spike dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©tectÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©! Changement: " 
                   << voltage_change << "V en " << time_diff << "ms" << std::endl;
         return true;
     }
@@ -467,7 +525,7 @@ bool VoltageGlitchProtection::detect_voltage_spike(const VoltageGlitchSample& sa
 }
 
 bool VoltageGlitchProtection::detect_voltage_dip(const VoltageGlitchSample& sample) {
-    // Voltage dip: baisse soudaine et brève
+    // Voltage dip: baisse soudaine et brÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¨ve
     if (glitch_history.size() < 2) {
         return false;
     }
@@ -477,7 +535,7 @@ bool VoltageGlitchProtection::detect_voltage_dip(const VoltageGlitchSample& samp
     double time_diff = (sample.timestamp - previous.timestamp) / 1000000.0; // ms
     
     if (time_diff > 0 && voltage_change / time_diff > 50.0) { // 50V/ms
-        std::cout << "🚨 Voltage dip détecté! Changement: " 
+        std::cout << "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¨ Voltage dip dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©tectÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©! Changement: " 
                   << voltage_change << "V en " << time_diff << "ms" << std::endl;
         return true;
     }
@@ -488,44 +546,40 @@ bool VoltageGlitchProtection::detect_voltage_dip(const VoltageGlitchSample& samp
 // ===== CONTRE-MESURES VOLTAGE =====
 
 void VoltageGlitchProtection::implement_voltage_clamping_internal() {
-    std::cout << "⚡ Implémentation clamping voltage..." << std::endl;
+    std::cout << "ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¡ ImplÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©mentation clamping voltage..." << std::endl;
     
     // Activer le clamping voltage
     voltage_clamping_active = true;
     
-    // Créer un fichier de statut
-    std::ofstream status_file(clamping_status_path);
-    if (status_file.is_open()) {
-        status_file << "CLAMPING_ACTIVE=1" << std::endl;
-        status_file << "CLAMPING_THRESHOLD=" << clamping_threshold_mv.load() << "mV" << std::endl;
-        status_file << "CLAMPING_METHOD=Active_Zener" << std::endl;
-        status_file.close();
-    }
+    // CrÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©er un fichier de statut
+    std::ostringstream status;
+    status << "CLAMPING_ACTIVE=1\n";
+    status << "CLAMPING_THRESHOLD=" << clamping_threshold_mv.load() << "mV\n";
+    status << "CLAMPING_METHOD=Active_Zener\n";
+    (void)write_text_file_best_effort(clamping_status_path, status.str());
     
-    std::cout << "✅ Clamping voltage activé (seuil: " 
+    std::cout << "ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ Clamping voltage activÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â© (seuil: " 
               << clamping_threshold_mv.load() << "mV)" << std::endl;
 }
 
 void VoltageGlitchProtection::setup_voltage_watchdog_internal() {
-    std::cout << "🐕 Configuration watchdog voltage..." << std::endl;
+    std::cout << "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€šÃ‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Configuration watchdog voltage..." << std::endl;
     
     // Activer le watchdog voltage
     watchdog_active = true;
     
-    // Créer un fichier de statut
-    std::ofstream status_file(watchdog_status_path);
-    if (status_file.is_open()) {
-        status_file << "WATCHDOG_ACTIVE=1" << std::endl;
-        status_file << "WATCHDOG_TIMEOUT=5000ms" << std::endl;
-        status_file << "WATCHDOG_METHOD=Hardware_Timer" << std::endl;
-        status_file.close();
-    }
+    // CrÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©er un fichier de statut
+    std::ostringstream status;
+    status << "WATCHDOG_ACTIVE=1\n";
+    status << "WATCHDOG_TIMEOUT=5000ms\n";
+    status << "WATCHDOG_METHOD=Hardware_Timer\n";
+    (void)write_text_file_best_effort(watchdog_status_path, status.str());
     
-    std::cout << "✅ Watchdog voltage configuré" << std::endl;
+    std::cout << "ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ Watchdog voltage configurÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©" << std::endl;
 }
 
 void VoltageGlitchProtection::trigger_voltage_clamping() {
-    std::cout << "🚨 Déclenchement clamping voltage!" << std::endl;
+    std::cout << "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¨ DÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©clenchement clamping voltage!" << std::endl;
     
     implement_voltage_clamping();
     adjust_voltage_protection();
@@ -534,31 +588,31 @@ void VoltageGlitchProtection::trigger_voltage_clamping() {
 }
 
 void VoltageGlitchProtection::trigger_watchdog_reset() {
-    std::cout << "🐕 Déclenchement reset watchdog!" << std::endl;
+    std::cout << "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€šÃ‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ DÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©clenchement reset watchdog!" << std::endl;
     
     setup_voltage_watchdog();
     
-    std::cout << "[SENTINEL][VOLT] Reset watchdog matériel non disponible sur cette plateforme." << std::endl;
+    std::cout << "[SENTINEL][VOLT] Reset watchdog matÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©riel non disponible sur cette plateforme." << std::endl;
 }
 
 void VoltageGlitchProtection::adjust_voltage_protection() {
-    std::cout << "🎛️ Ajustement protection voltage..." << std::endl;
+    std::cout << "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€¦Ã‚Â½ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â Ajustement protection voltage..." << std::endl;
     
-    // Ajuster dynamiquement la sensibilité basée sur les glitches détectés
+    // Ajuster dynamiquement la sensibilitÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â© basÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©e sur les glitches dÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©tectÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©s
     uint32_t glitches = glitch_count.load();
     
     if (glitches > 10) {
         glitch_threshold_percent = 5.0; // Plus sensible
-        clamping_threshold_mv = 50; // Plus réactif
+        clamping_threshold_mv = 50; // Plus rÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©actif
     } else if (glitches > 5) {
         glitch_threshold_percent = 7.5; // Moyennement sensible
-        clamping_threshold_mv = 75; // Moyennement réactif
+        clamping_threshold_mv = 75; // Moyennement rÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©actif
     } else {
         glitch_threshold_percent = 10.0; // Normal
         clamping_threshold_mv = 100; // Normal
     }
     
-    std::cout << "📊 Seuil glitch ajusté à " 
+    std::cout << "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒâ€¦Ã‚Â  Seuil glitch ajustÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â© ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â  " 
               << glitch_threshold_percent.load() << "%" << std::endl;
 }
 
@@ -658,7 +712,7 @@ void VoltageGlitchProtection::deactivate_watchdog() {
 }
 
 bool VoltageGlitchProtection::test_voltage_glitch_protection() {
-    std::cout << "🧪 Test protection voltage glitch..." << std::endl;
+    std::cout << "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€šÃ‚Â§Ãƒâ€šÃ‚Âª Test protection voltage glitch..." << std::endl;
     
     // Simuler un under-voltage
     VoltageGlitchSample glitch_sample;
@@ -671,7 +725,7 @@ bool VoltageGlitchProtection::test_voltage_glitch_protection() {
     
     bool detection_works = detect_under_voltage_glitch(glitch_sample);
     
-    std::cout << "Test voltage glitch protection: " << (detection_works ? "✅ PASS" : "❌ FAIL") << std::endl;
+    std::cout << "Test voltage glitch protection: " << (detection_works ? "ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ PASS" : "ÃƒÆ’Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒâ€¦Ã¢â‚¬â„¢ FAIL") << std::endl;
     return detection_works;
 }
 
@@ -795,13 +849,13 @@ double VoltageGlitchProtection::calculate_voltage_risk(const VoltageGlitchSample
     double nominal = nominal_voltage.load();
     double voltage_ratio = sample.voltage_v / nominal;
     
-    // Calculer le risque basé sur le rapport de voltage
+    // Calculer le risque basÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â© sur le rapport de voltage
     if (voltage_ratio < 0.5) {
-        return 1.0; // Risque maximum (under-voltage sévère)
+        return 1.0; // Risque maximum (under-voltage sÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©vÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¨re)
     } else if (voltage_ratio > 1.5) {
-        return 1.0; // Risque maximum (over-voltage sévère)
+        return 1.0; // Risque maximum (over-voltage sÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©vÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¨re)
     } else if (voltage_ratio < 0.8 || voltage_ratio > 1.2) {
-        return 0.8; // Risque élevé
+        return 0.8; // Risque ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©levÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©
     } else if (voltage_ratio < 0.9 || voltage_ratio > 1.1) {
         return 0.5; // Risque moyen
     } else {
@@ -821,14 +875,12 @@ bool VoltageGlitchProtection::is_voltage_anomalous(double voltage) {
 }
 
 void VoltageGlitchProtection::log_voltage_event(const std::string& event, const VoltageGlitchSample& sample) {
-    std::ofstream log_file(voltage_log_path, std::ios::app);
-    if (log_file.is_open()) {
-        log_file << "[" << sample.timestamp << "] " << event
-                << " - Voltage: " << sample.voltage_v << "V"
-                << ", Duration: " << sample.duration_us << "μs"
-                << ", Type: " << static_cast<int>(sample.glitch_type) << std::endl;
-        log_file.close();
-    }
+    std::ostringstream line;
+    line << "[" << sample.timestamp << "] " << event
+         << " - Voltage: " << sample.voltage_v << "V"
+         << ", Duration: " << sample.duration_us << "us"
+         << ", Type: " << static_cast<int>(sample.glitch_type) << "\n";
+    (void)append_text_file_best_effort(voltage_log_path, line.str());
 }
 
 } // namespace hesia

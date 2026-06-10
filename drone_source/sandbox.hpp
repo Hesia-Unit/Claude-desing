@@ -175,6 +175,7 @@ public:
     static bool enable_network_mode();
     static bool enable_filesystem_mode();
     static bool enable_full_mode();
+    static SandboxMode get_current_mode();
     
     // Statistiques unifiées
     static uint32_t get_total_violations();

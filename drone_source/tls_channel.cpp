@@ -211,7 +211,21 @@ bool TLSChannel::is_ip_literal(const std::string& host) {
 
 std::vector<uint8_t> TLSChannel::sha256(const uint8_t* data, size_t len) {
     std::vector<uint8_t> out(SHA256_DIGEST_LENGTH);
-    SHA256(data, len, out.data());
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) {
+        throw std::runtime_error("EVP_MD_CTX_new failed");
+    }
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1 ||
+        EVP_DigestUpdate(ctx, data, len) != 1) {
+        EVP_MD_CTX_free(ctx);
+        throw std::runtime_error("EVP sha256 init/update failed");
+    }
+    unsigned int out_len = 0;
+    if (EVP_DigestFinal_ex(ctx, out.data(), &out_len) != 1 || out_len != SHA256_DIGEST_LENGTH) {
+        EVP_MD_CTX_free(ctx);
+        throw std::runtime_error("EVP sha256 final failed");
+    }
+    EVP_MD_CTX_free(ctx);
     return out;
 }
 
@@ -463,8 +477,10 @@ void TLSChannel::request_key_update() {
     if (!ssl_ || !connected_) return;
     // TLS 1.3 KeyUpdate
     SSL_key_update(ssl_, SSL_KEY_UPDATE_REQUESTED);
-    // Force sending KeyUpdate now.
-    SSL_do_handshake(ssl_);
+    // Let the next application write carry the KeyUpdate record.
+    // Forcing SSL_do_handshake() while the connection is already in the
+    // application-data state can wedge the stream on some OpenSSL/Jetson
+    // combinations and lead to spurious write failures under load.
 }
 
 void TLSChannel::close() {

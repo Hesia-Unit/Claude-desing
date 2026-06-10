@@ -1,114 +1,145 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="fr">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HESIA // Command Interface</title>
-  <link rel="stylesheet" href="styles.css" />
+  <title>HESIA Operations Console</title>
+  <link rel="stylesheet" href="styles.css?v=20260426c" />
 </head>
 <body>
-  <div class="scanlines"></div>
-  <div class="hud">
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-title">HESIA • eDEX‑INSPIRED</div>
-        <div class="brand-sub">Secure Drone Ops Console</div>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="header-copy">
+        <div class="eyebrow">HESIA OPERATIONS</div>
+        <h1>Console de supervision drone</h1>
+        <p>Observation temps réel, télémétrie, flux vidéo et traces d’exécution.</p>
       </div>
-      <div class="gauges">
-        <div class="gauge" data-key="cpu_temp_c" data-max="95" data-unit="°C">
-          <div class="gauge-face">
-            <div class="gauge-needle"></div>
-            <div class="gauge-center"></div>
-          </div>
-          <div class="gauge-label">CPU TEMP</div>
-          <div class="gauge-value">--</div>
+      <div class="header-status">
+        <div class="status-card">
+          <span class="status-label">Session</span>
+          <strong id="sessionStatus">Initialisation</strong>
         </div>
-        <div class="gauge" data-key="cpu_usage_pct" data-max="100" data-unit="%">
-          <div class="gauge-face">
-            <div class="gauge-needle"></div>
-            <div class="gauge-center"></div>
-          </div>
-          <div class="gauge-label">CPU UTIL</div>
-          <div class="gauge-value">--</div>
+        <div class="status-card">
+          <span class="status-label">Flux vidéo</span>
+          <strong id="videoStatus">Démarrage</strong>
         </div>
-        <div class="gauge" data-key="ram_used_mb" data-max="8192" data-unit="MB" data-total="ram_total_mb">
-          <div class="gauge-face">
-            <div class="gauge-needle"></div>
-            <div class="gauge-center"></div>
-          </div>
-          <div class="gauge-label">RAM USED</div>
-          <div class="gauge-value">--</div>
-        </div>
-        <div class="gauge" data-key="voltage_v" data-max="20" data-unit="V">
-          <div class="gauge-face">
-            <div class="gauge-needle"></div>
-            <div class="gauge-center"></div>
-          </div>
-          <div class="gauge-label">VOLTAGE</div>
-          <div class="gauge-value">--</div>
-        </div>
-        <div class="gauge" data-key="current_a" data-max="10" data-unit="A">
-          <div class="gauge-face">
-            <div class="gauge-needle"></div>
-            <div class="gauge-center"></div>
-          </div>
-          <div class="gauge-label">AMPERAGE</div>
-          <div class="gauge-value">--</div>
-        </div>
-        <div class="gauge" data-key="power_w" data-max="120" data-unit="W">
-          <div class="gauge-face">
-            <div class="gauge-needle"></div>
-            <div class="gauge-center"></div>
-          </div>
-          <div class="gauge-label">POWER</div>
-          <div class="gauge-value">--</div>
+        <div class="status-card">
+          <span class="status-label">Dernière frame</span>
+          <strong id="feedFreshness">--</strong>
         </div>
       </div>
     </header>
 
-    <aside class="left">
-      <div class="panel terminal">
-        <div class="panel-title">TERMINAL / LOGS</div>
-        <div id="logView" class="terminal-body"></div>
-      </div>
-    </aside>
+    <section class="overview-grid">
+      <article class="metric-card">
+        <span class="metric-label">Température CPU</span>
+        <strong class="metric-value" id="metricCpuTemp">--</strong>
+        <span class="metric-meta" id="metricCpuTempMeta">n/a</span>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Charge CPU</span>
+        <strong class="metric-value" id="metricCpuUsage">--</strong>
+        <span class="metric-meta" id="metricCpuUsageMeta">n/a</span>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Mémoire</span>
+        <strong class="metric-value" id="metricRam">--</strong>
+        <span class="metric-meta" id="metricRamMeta">n/a</span>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Puissance</span>
+        <strong class="metric-value" id="metricPower">--</strong>
+        <span class="metric-meta" id="metricPowerMeta">n/a</span>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Position GPS</span>
+        <strong class="metric-value" id="metricGps">--</strong>
+        <span class="metric-meta" id="metricGpsMeta">n/a</span>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Drone ID</span>
+        <strong class="metric-value" id="metricDrone">--</strong>
+        <span class="metric-meta" id="metricDroneMeta">session active</span>
+      </article>
+    </section>
 
-    <main class="center">
-      <section class="panel video-panel">
-        <div class="panel-title">LIVE FEED</div>
-        <div class="video-screen">
-          <img id="videoFrame" alt="Live" />
-          <div class="video-overlay">
-            <div class="status-line" id="videoStatus">LIVE</div>
-            <div class="status-line" id="frameMeta">FRAME --</div>
+    <main class="content-grid">
+      <section class="panel panel-video">
+        <div class="panel-header">
+          <div>
+            <span class="panel-eyebrow">Flux principal</span>
+            <h2>Live feed</h2>
+          </div>
+          <div class="panel-actions">
+            <button id="btnBack" type="button">Retour</button>
+            <button id="btnPause" type="button">Pause</button>
+            <button id="btnLive" type="button">Live</button>
           </div>
         </div>
-        <div class="video-controls">
-          <button id="btnBack">⟲ BACK</button>
-          <button id="btnPause">⏸ PAUSE</button>
-          <button id="btnLive">▶ LIVE</button>
+        <div class="video-stage">
+          <img id="videoFrame" alt="Flux vidéo du drone" />
+          <div class="video-fallback" id="videoFallback">
+            <strong>En attente de flux</strong>
+            <span id="videoFallbackReason">Le serveur attend la prochaine image décodée.</span>
+          </div>
+          <div class="video-overlay">
+            <span class="overlay-pill" id="overlayStatus">SYNC</span>
+            <span class="overlay-pill" id="frameMeta">Frame --</span>
+            <span class="overlay-pill" id="frameBytes">--</span>
+          </div>
         </div>
+      </section>
+
+      <aside class="side-column">
+        <section class="panel panel-map">
+          <div class="panel-header">
+            <div>
+              <span class="panel-eyebrow">Localisation</span>
+              <h2>Repère drone</h2>
+            </div>
+          </div>
+          <canvas id="globeCanvas" width="360" height="260"></canvas>
+          <div class="map-readouts">
+            <div>
+              <span class="readout-label">GPS</span>
+              <strong id="gpsReadout">--</strong>
+            </div>
+            <div>
+              <span class="readout-label">Identifiant</span>
+              <strong id="jetsonId">--</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel-tree">
+          <div class="panel-header">
+            <div>
+              <span class="panel-eyebrow">Inspection</span>
+              <h2>Arborescence</h2>
+            </div>
+          </div>
+          <div id="filePath" class="file-path">/</div>
+          <div id="fileTree" class="file-tree"></div>
+        </section>
+      </aside>
+
+      <section class="panel panel-logs">
+        <div class="panel-header">
+          <div>
+            <span class="panel-eyebrow">Journal</span>
+            <h2>Logs temps réel</h2>
+          </div>
+          <div class="log-legend">
+            <span class="legend-pill legend-info">Info</span>
+            <span class="legend-pill legend-warn">Warn</span>
+            <span class="legend-pill legend-error">Erreur</span>
+          </div>
+        </div>
+        <div id="logView" class="terminal-body"></div>
       </section>
     </main>
-
-    <aside class="right">
-      <section class="panel globe-panel">
-        <div class="panel-title">DRONE GEO‑HOLO</div>
-        <canvas id="globeCanvas" width="360" height="260"></canvas>
-        <div class="globe-meta">
-          <div id="gpsReadout">GPS: --</div>
-          <div id="jetsonId">DRONE: --</div>
-        </div>
-      </section>
-
-      <section class="panel files-panel">
-        <div class="panel-title">FILESYSTEM</div>
-        <div id="filePath" class="file-path">/</div>
-        <div id="fileTree" class="file-tree"></div>
-      </section>
-    </aside>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=20260426c"></script>
 </body>
 </html>

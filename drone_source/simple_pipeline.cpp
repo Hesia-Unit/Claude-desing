@@ -378,7 +378,7 @@ void SimplePipeline::set_gpu_ids(int yolo_gpu, int midas_gpu) {
 }
 
 SimplePipeline::PipelineStats SimplePipeline::get_stats() const {
-    // TODO: Implémenter les statistiques
+    // PipelineStats stays zeroed until explicit runtime accounting is wired in.
     return PipelineStats{};
 }
 

@@ -8,15 +8,101 @@
 #include <unordered_map>
 #include <algorithm>
 #include <string>
+#include <cstdlib>
 
 namespace hesia {
+
+namespace {
+
+std::filesystem::path canonicalize_existing_path_or_throw(const std::filesystem::path& path) {
+    std::error_code ec;
+    const std::filesystem::file_status status = std::filesystem::symlink_status(path, ec);
+    if (!ec && status.type() == std::filesystem::file_type::symlink) {
+        throw std::runtime_error("Les chemins symboliques sont interdits pour les traces M2B");
+    }
+
+    try {
+        return std::filesystem::canonical(path);
+    } catch (...) {
+        return std::filesystem::weakly_canonical(path);
+    }
+}
+
+std::filesystem::path resolve_trace_dir_or_throw(const std::filesystem::path& configured_dir) {
+    std::filesystem::path allowed_root;
+    if (const char* allowed_root_env = std::getenv("HESIA_ALLOWED_TRACE_ROOT");
+        allowed_root_env && allowed_root_env[0] != '\0') {
+        allowed_root = allowed_root_env;
+    } else {
+        allowed_root = Config::BB_DIR;
+    }
+    if (allowed_root.is_relative()) {
+        allowed_root = Config::BASE_DIR / allowed_root;
+    }
+    std::filesystem::create_directories(allowed_root);
+    const std::filesystem::path canonical_allowed_root =
+        canonicalize_existing_path_or_throw(allowed_root);
+
+    std::filesystem::path candidate = configured_dir.empty()
+        ? (canonical_allowed_root / "m2b_dataset")
+        : configured_dir;
+    if (candidate.is_relative()) {
+        candidate = Config::BASE_DIR / candidate;
+    }
+    std::filesystem::create_directories(candidate);
+    const std::filesystem::path canonical_candidate =
+        canonicalize_existing_path_or_throw(candidate);
+
+    const std::filesystem::path relative = canonical_candidate.lexically_relative(canonical_allowed_root);
+    if (relative.empty() || relative == "." || (!relative.empty() && *relative.begin() == "..")) {
+        throw std::runtime_error("HESIA_M2B_TRACE_DIR hors racine autorisee");
+    }
+
+    return canonical_candidate;
+}
+
+} // namespace
 
 CleanPipeline::CleanPipeline()
     : yolo_gpu_id(0), midas_gpu_id(0), running(false), frame_counter(0) {
 
     logger = setup_logger("clean_pipeline", Config::LOG_DIR);
     logger->info("Initialisation du pipeline clean...");
-    logger->info("Mamba log disabled (config fixe)");
+
+    if (const char* mamba_env = std::getenv("HESIA_MAMBA_LOG");
+        mamba_env && std::string(mamba_env) == "1") {
+        mamba_log_enabled = true;
+    }
+    if (const char* trace_env = std::getenv("HESIA_M2B_TRACE");
+        trace_env && std::string(trace_env) == "1") {
+        m2b_trace_enabled = true;
+    }
+    if (const char* trace_every_env = std::getenv("HESIA_M2B_TRACE_EVERY_N");
+        trace_every_env && trace_every_env[0] != '\0') {
+        try {
+            m2b_trace_every_n = std::max(1, std::stoi(trace_every_env));
+        } catch (...) {
+            m2b_trace_every_n = 15;
+        }
+    }
+    if (const char* trace_dir_env = std::getenv("HESIA_M2B_TRACE_DIR");
+        trace_dir_env && trace_dir_env[0] != '\0') {
+        m2b_trace_dir = trace_dir_env;
+    } else {
+        m2b_trace_dir = Config::BB_DIR / "m2b_dataset";
+    }
+    try {
+        m2b_trace_dir = resolve_trace_dir_or_throw(m2b_trace_dir);
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string("Configuration trace M2B invalide: ") + e.what());
+    }
+
+    logger->info(std::string("Mamba log: ") + (mamba_log_enabled ? "ACTIF" : "INACTIF"));
+    logger->info(std::string("M2B trace: ") + (m2b_trace_enabled ? "ACTIVE" : "INACTIVE"));
+    if (m2b_trace_enabled) {
+        logger->info("M2B trace every N frames: " + std::to_string(m2b_trace_every_n));
+        logger->info("M2B trace dir: " + m2b_trace_dir.string());
+    }
 }
 
 CleanPipeline::~CleanPipeline() {
@@ -74,6 +160,7 @@ void CleanPipeline::capture_worker() {
     }
 
     const int max_queue_size = 30;
+    bool eof_backoff_logged = false;
     logger->info("[CAPTURE] capture_worker: Démarrage capture vidéo...");
 
     while (running.load()) {
@@ -244,6 +331,7 @@ void CleanPipeline::midas_worker() {
                     midas_processor->process(frame_data.frame_id, frame_data.original_frame);
 
                 frame_data.midas_result = std::move(midas_colored);
+                frame_data.midas_depth_map = std::move(midas_map);
                 frame_data.deep_skel_state = std::move(deep_skel);
             }
 
@@ -316,6 +404,9 @@ void CleanPipeline::send_worker() {
                     frame_data.midas_result = it->second.midas_result;
                     frame_data.deep_skel_state = it->second.deep_skel_state;
                 }
+                if (frame_data.midas_depth_map.empty() && !it->second.midas_depth_map.empty()) {
+                    frame_data.midas_depth_map = it->second.midas_depth_map;
+                }
                 if (frame_data.original_frame.empty() && !it->second.original_frame.empty()) {
                     frame_data.original_frame = it->second.original_frame;
                 }
@@ -356,7 +447,7 @@ void CleanPipeline::send_worker() {
             }
 
             // Queue logging (30 FPS)
-            if (mamba_log_enabled) {
+            if (mamba_log_enabled || m2b_trace_enabled) {
                 std::lock_guard<std::mutex> log_lock(logging_mutex);
                 if (logging_queue.size() < 100) {
                     logging_queue.push(frame_data);
@@ -485,12 +576,12 @@ bool CleanPipeline::start() {
     yolo_thread = std::thread(&CleanPipeline::yolo_worker, this);
     midas_thread = std::thread(&CleanPipeline::midas_worker, this);
     send_thread = std::thread(&CleanPipeline::send_worker, this);
-    if (mamba_log_enabled) {
+    if (mamba_log_enabled || m2b_trace_enabled) {
         logging_thread = std::thread(&CleanPipeline::frame_logging_worker, this);
     }
 
     logger->info("Pipeline clean d??marr?? - " +
-                 std::to_string(mamba_log_enabled ? 5 : 4) + " threads actifs");
+                 std::to_string((mamba_log_enabled || m2b_trace_enabled) ? 5 : 4) + " threads actifs");
     logger->info("YOLO: ACTIF");
     logger->info("MiDaS: " + std::string(midas_processor ? "ACTIF" : "INACTIF (mode dégradé)"));
 
@@ -622,14 +713,32 @@ void CleanPipeline::frame_logging_worker() {
 
     // Logs dataset pour modele sequentiel (Mamba)
     const std::filesystem::path mamba_dir = Config::BB_DIR / "mamba_dataset";
-    std::filesystem::create_directories(mamba_dir);
     const std::filesystem::path state_file = mamba_dir / "states.log";
+    if (mamba_log_enabled) {
+        std::filesystem::create_directories(mamba_dir);
+    }
+
+    const std::filesystem::path trace_rgb_dir = m2b_trace_dir / "rgb";
+    const std::filesystem::path trace_depth_dir = m2b_trace_dir / "depth";
+    const std::filesystem::path trace_preview_dir = m2b_trace_dir / "preview";
+    const std::filesystem::path trace_meta_file = m2b_trace_dir / "metadata.jsonl";
+    if (m2b_trace_enabled) {
+        std::filesystem::create_directories(trace_rgb_dir);
+        std::filesystem::create_directories(trace_depth_dir);
+        std::filesystem::create_directories(trace_preview_dir);
+    }
     const int YOLO_K = 16;
 
     std::ofstream state_f(state_file, std::ios::app);
-    if (!state_f.is_open()) {
+    if (mamba_log_enabled && !state_f.is_open()) {
         if (logger) {
             logger->warning("Impossible d'ouvrir le log Mamba: " + state_file.string());
+        }
+    }
+    std::ofstream trace_meta_f(trace_meta_file, std::ios::app);
+    if (m2b_trace_enabled && !trace_meta_f.is_open()) {
+        if (logger) {
+            logger->warning("Impossible d'ouvrir le log M2B: " + trace_meta_file.string());
         }
     }
 
@@ -693,21 +802,80 @@ void CleanPipeline::frame_logging_worker() {
                 }
                 json << "]}";
 
-                buffer += json.str();
-                buffer += "\n";
-                batch_count++;
+                if (mamba_log_enabled) {
+                    buffer += json.str();
+                    buffer += "\n";
+                    batch_count++;
 
-                auto now = std::chrono::steady_clock::now();
-                auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_flush).count();
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_flush).count();
 
-                if (batch_count >= mamba_log_batch || elapsed_ms >= flush_ms) {
-                    if (state_f.is_open()) {
-                        state_f << buffer;
-                        state_f.flush();
+                    if (batch_count >= mamba_log_batch || elapsed_ms >= flush_ms) {
+                        if (state_f.is_open()) {
+                            state_f << buffer;
+                            state_f.flush();
+                        }
+                        buffer.clear();
+                        batch_count = 0;
+                        last_flush = now;
                     }
-                    buffer.clear();
-                    batch_count = 0;
-                    last_flush = now;
+                }
+
+                if (m2b_trace_enabled && (frame_data.frame_id % m2b_trace_every_n == 0)) {
+                    const std::string frame_base = "frame_" + std::to_string(frame_data.frame_id);
+                    const auto rgb_path = trace_rgb_dir / (frame_base + ".jpg");
+                    const auto depth_path = trace_depth_dir / (frame_base + ".png");
+                    const auto preview_path = trace_preview_dir / (frame_base + ".jpg");
+
+                    if (!frame_data.original_frame.empty()) {
+                        cv::imwrite(rgb_path.string(), frame_data.original_frame);
+                    }
+
+                    double depth_min = 0.0;
+                    double depth_max = 0.0;
+                    if (!frame_data.midas_depth_map.empty()) {
+                        cv::minMaxLoc(frame_data.midas_depth_map, &depth_min, &depth_max);
+                        cv::Mat depth_u16(frame_data.midas_depth_map.size(), CV_16UC1, cv::Scalar(0));
+                        if (std::abs(depth_max - depth_min) > 1e-9) {
+                            frame_data.midas_depth_map.convertTo(
+                                depth_u16,
+                                CV_16UC1,
+                                65535.0 / (depth_max - depth_min),
+                                -65535.0 * depth_min / (depth_max - depth_min));
+                        }
+                        cv::imwrite(depth_path.string(), depth_u16);
+                    }
+
+                    if (!frame_data.original_frame.empty() && !frame_data.midas_result.empty()) {
+                        cv::Mat preview;
+                        cv::hconcat(frame_data.original_frame, frame_data.midas_result, preview);
+                        cv::imwrite(preview_path.string(), preview);
+                    }
+
+                    if (trace_meta_f.is_open()) {
+                        std::ostringstream meta;
+                        meta.setf(std::ios::fixed);
+                        meta << std::setprecision(6);
+                        meta << "{\"frame_id\":" << frame_data.frame_id
+                             << ",\"rgb\":\"" << rgb_path.filename().string() << "\""
+                             << ",\"depth\":\"" << depth_path.filename().string() << "\""
+                             << ",\"preview\":\"" << preview_path.filename().string() << "\""
+                             << ",\"depth_min\":" << depth_min
+                             << ",\"depth_max\":" << depth_max
+                             << ",\"yolo_state\":[";
+                        for (size_t i = 0; i < y_state.size(); ++i) {
+                            if (i) meta << ",";
+                            meta << y_state[i];
+                        }
+                        meta << "],\"midas_state\":[";
+                        for (size_t i = 0; i < frame_data.deep_skel_state.size(); ++i) {
+                            if (i) meta << ",";
+                            meta << frame_data.deep_skel_state[i];
+                        }
+                        meta << "]}\n";
+                        trace_meta_f << meta.str();
+                        trace_meta_f.flush();
+                    }
                 }
 
             } catch (const std::exception& e) {

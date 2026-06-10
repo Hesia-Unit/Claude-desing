@@ -1,0 +1,11 @@
+CUDA
+GNAT
+OpenCV
+OpenSSL
+PkgConfig
+Threads
+liboqs
+seccomp
+spdlog
+teec
+TensorRT

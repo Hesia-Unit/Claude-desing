@@ -10,11 +10,11 @@
 #include "stack_protection.hpp"
 #include "logger.hpp"
 #include "config.hpp"
+#include "security_utils.hpp"
 #include <cstring>
 #include <cstdio>
 #include <iostream>
 #include <cstring>
-#include <random>
 #include <algorithm>
 #include <chrono>
 
@@ -70,12 +70,10 @@ bool StackProtection::initialize() {
 }
 
 void StackProtection::generate_canary() {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<uint32_t> dist;
-    
-    // Générer un canary avec pattern difficile à deviner
-    uint32_t new_canary = dist(gen);
+    uint32_t new_canary = 0;
+    if (!SecureRNG::generate_bytes(reinterpret_cast<uint8_t*>(&new_canary), sizeof(new_canary))) {
+        throw std::runtime_error("SecureRNG::generate_bytes failed for stack canary");
+    }
     
     // Ajouter des bits spécifiques pour rendre le canary détectable
     new_canary |= 0xFF; // Byte de terminaison nulle

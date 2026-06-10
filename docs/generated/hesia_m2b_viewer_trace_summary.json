@@ -1,0 +1,38 @@
+{
+  "mode": "trace",
+  "frames": 6,
+  "video": "docs\\generated\\hesia_m2b_viewer_trace.mp4",
+  "contact_sheet": "docs\\generated\\hesia_m2b_viewer_trace_contact_sheet.jpg",
+  "summary": [
+    {
+      "frame": 0.0,
+      "risk": 0.5552205443382263,
+      "action_l1": 0.5633542537689209
+    },
+    {
+      "frame": 1.0,
+      "risk": 0.5552205443382263,
+      "action_l1": 0.5633542537689209
+    },
+    {
+      "frame": 2.0,
+      "risk": 0.5671401023864746,
+      "action_l1": 0.5633083581924438
+    },
+    {
+      "frame": 3.0,
+      "risk": 0.5741583108901978,
+      "action_l1": 0.5633721351623535
+    },
+    {
+      "frame": 4.0,
+      "risk": 0.5751129388809204,
+      "action_l1": 0.563759446144104
+    },
+    {
+      "frame": 5.0,
+      "risk": 0.5839993953704834,
+      "action_l1": 0.5641151666641235
+    }
+  ]
+}

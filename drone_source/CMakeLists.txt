@@ -10,16 +10,32 @@ option(HESIA_FIPS_BUILD "Build FIPS-ready version (disable PQC)" OFF)
 option(HESIA_USE_FIPS_MODULE "Use FIPS module wrapper" OFF)
 option(HESIA_ENABLE_HARDENING "Enable common hardening flags" ON)
 option(HESIA_ENABLE_CFI "Enable Clang CFI/LTO hardening (Clang only)" OFF)
+option(HESIA_ENABLE_SAFE_STACK "Enable Clang SafeStack when the target/runtime supports it" OFF)
+option(HESIA_ENABLE_SHADOW_CALL_STACK "Enable Clang ShadowCallStack when the target/runtime supports it" OFF)
 option(HESIA_ENABLE_LTO "Enable LTO (IPO) when supported" ON)
 option(HESIA_STRIP_SYMBOLS "Strip symbols in Release builds" ON)
+option(HESIA_SPLIT_DEBUG_INFO "Emit split debug info sidecars before stripping Release binaries" ON)
+option(HESIA_ENABLE_RELEASE_CLOAKING "Enable additional reverse-cost measures for Release binaries" ON)
 option(HESIA_ENABLE_SENTINEL "Build HESIA Sentinel (Ada) module" ON)
 option(HESIA_DISABLE_CFI_OPENCV "Disable CFI on OpenCV modules (workaround for CFI traps)" OFF)
+option(HESIA_REPRODUCIBLE_BUILD "Enable reproducible-build path remapping flags" ON)
+option(HESIA_ALLOW_SOFT_SIGN "Allow ML-DSA secret-key signing in the normal world (REE). Non-production only." OFF)
 
 if(HESIA_FIPS_BUILD)
     message(FATAL_ERROR "FIPS build not allowed: PQC/liboqs is mandatory for this build")
 endif()
 if(HESIA_USE_FIPS_MODULE)
     message(STATUS "Using FIPS module wrapper")
+endif()
+
+if(HESIA_REPRODUCIBLE_BUILD AND NOT MSVC)
+    add_compile_options(
+        "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=."
+        "-fdebug-prefix-map=${CMAKE_SOURCE_DIR}=."
+    )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_link_options("-Wl,--build-id=none")
+    endif()
 endif()
 
 # ===== LTO SUPPORT =====
@@ -30,6 +46,8 @@ if(HESIA_ENABLE_LTO)
         message(WARNING "LTO/IPO not supported: ${HESIA_IPO_MSG}")
     endif()
 endif()
+
+find_program(HESIA_OBJCOPY_EXECUTABLE NAMES objcopy llvm-objcopy)
 
 # ===== DEPENDENCIES =====
 find_package(OpenCV REQUIRED)
@@ -168,6 +186,7 @@ set(SOURCES
     tls_channel.cpp
     secure_channel.cpp
     video_channel.cpp
+    video_packet_parser.cpp
     video_manager.cpp
     drone_network.cpp
     error_handler.cpp
@@ -280,13 +299,17 @@ if(HESIA_ENABLE_SENTINEL)
     add_dependencies(hesia_drone hesia_sentinel_lib)
 
     add_library(hesia_sentinel SHARED IMPORTED GLOBAL)
-    set_target_properties(hesia_sentinel PROPERTIES IMPORTED_LOCATION "${SENTINEL_LIB}")
+    set_target_properties(hesia_sentinel PROPERTIES
+        IMPORTED_LOCATION "${SENTINEL_LIB}"
+        IMPORTED_NO_SONAME TRUE
+        IMPORTED_SONAME "libhesia_sentinel.so"
+    )
 
     if(NOT WIN32)
         # Ensure runtime can find the Sentinel shared library
         set_target_properties(hesia_drone PROPERTIES
-            BUILD_RPATH "${SENTINEL_DIR}/lib"
-            INSTALL_RPATH "${SENTINEL_DIR}/lib"
+            BUILD_RPATH "$ORIGIN/../lib;${SENTINEL_DIR}/lib"
+            INSTALL_RPATH "$ORIGIN/../lib"
         )
     endif()
 endif()
@@ -357,6 +380,10 @@ endif()
 if(HESIA_USE_FIPS_MODULE)
     target_compile_definitions(hesia_drone PRIVATE HESIA_USE_FIPS_MODULE)
 endif()
+if(HESIA_ALLOW_SOFT_SIGN)
+    target_compile_definitions(hesia_drone PRIVATE HESIA_ALLOW_SOFT_SIGN)
+    message(WARNING "HESIA_ALLOW_SOFT_SIGN is enabled: ML-DSA secret-key operations are allowed outside OP-TEE. Non-production only.")
+endif()
 
 # ===== liboqs (PQC) =====
 if(NOT HESIA_FIPS_BUILD)
@@ -406,7 +433,8 @@ else()
         target_compile_options(hesia_drone PRIVATE
             -fstack-protector-strong
             -fstack-clash-protection
-            -D_FORTIFY_SOURCE=2
+            -U_FORTIFY_SOURCE
+            -D_FORTIFY_SOURCE=3
             -fPIE
             -ffunction-sections
             -fdata-sections
@@ -423,8 +451,25 @@ else()
         )
     endif()
 
+    if(HESIA_ENABLE_RELEASE_CLOAKING)
+        target_compile_options(hesia_drone PRIVATE
+            -fno-plt
+            -fmerge-all-constants
+            -fno-ident
+        )
+        target_link_options(hesia_drone PRIVATE
+            -Wl,--as-needed
+            -Wl,--exclude-libs,ALL
+            -Wl,-O2
+        )
+    endif()
+
     # Optional: Clang CFI (OFF by default because it can be fragile)
     if(HESIA_ENABLE_CFI AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        find_program(HESIA_LLD_EXECUTABLE NAMES ld.lld lld)
+        if(NOT HESIA_LLD_EXECUTABLE)
+            message(FATAL_ERROR "Clang CFI build requires lld (ld.lld)")
+        endif()
         target_compile_options(hesia_drone PRIVATE
             -flto
             -fvisibility=hidden
@@ -432,10 +477,36 @@ else()
         )
         target_link_options(hesia_drone PRIVATE
             -flto
+            -fuse-ld=lld
             -fsanitize=cfi
         )
         # Use explicit -D to avoid generator quirks in some compile databases
         target_compile_options(hesia_drone PRIVATE -DHESIA_CFI_BUILD=1)
+
+        include(CheckCXXCompilerFlag)
+        if(HESIA_ENABLE_SAFE_STACK)
+            check_cxx_compiler_flag("-fsanitize=safe-stack" HESIA_SAFE_STACK_OK)
+            if(HESIA_SAFE_STACK_OK)
+                target_compile_options(hesia_drone PRIVATE -fsanitize=safe-stack)
+                target_link_options(hesia_drone PRIVATE -fsanitize=safe-stack)
+            else()
+                message(FATAL_ERROR "HESIA_ENABLE_SAFE_STACK requested but unsupported by this Clang toolchain/runtime")
+            endif()
+        endif()
+
+        if(HESIA_ENABLE_SHADOW_CALL_STACK)
+            if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|AARCH64)$")
+                check_cxx_compiler_flag("-ffixed-x18 -fsanitize=shadow-call-stack" HESIA_SCS_OK)
+                if(HESIA_SCS_OK)
+                    target_compile_options(hesia_drone PRIVATE -ffixed-x18 -fsanitize=shadow-call-stack)
+                    target_link_options(hesia_drone PRIVATE -ffixed-x18 -fsanitize=shadow-call-stack)
+                else()
+                    message(FATAL_ERROR "HESIA_ENABLE_SHADOW_CALL_STACK requested but unsupported by this Clang/aarch64 toolchain")
+                endif()
+            else()
+                message(FATAL_ERROR "HESIA_ENABLE_SHADOW_CALL_STACK requires an aarch64 target")
+            endif()
+        endif()
     endif()
 
     if(HESIA_ENABLE_LTO AND HESIA_IPO_OK)
@@ -443,9 +514,19 @@ else()
     endif()
 
     if(HESIA_STRIP_SYMBOLS AND CMAKE_BUILD_TYPE STREQUAL "Release")
-        if(CMAKE_STRIP)
+        if(CMAKE_STRIP AND HESIA_OBJCOPY_EXECUTABLE AND HESIA_SPLIT_DEBUG_INFO)
             add_custom_command(TARGET hesia_drone POST_BUILD
-                COMMAND "${CMAKE_STRIP}" "$<TARGET_FILE:hesia_drone>"
+                COMMAND bash "${CMAKE_SOURCE_DIR}/../tools/harden_release_binary.sh"
+                        "$<TARGET_FILE:hesia_drone>"
+                        "$<TARGET_FILE_DIR:hesia_drone>/debug"
+                        "${CMAKE_STRIP}"
+                        "${HESIA_OBJCOPY_EXECUTABLE}"
+                        "hesia_drone"
+                COMMENT "Hardening and stripping hesia_drone"
+            )
+        elseif(CMAKE_STRIP)
+            add_custom_command(TARGET hesia_drone POST_BUILD
+                COMMAND "${CMAKE_STRIP}" --strip-all "$<TARGET_FILE:hesia_drone>"
                 COMMENT "Stripping symbols from hesia_drone"
             )
         endif()

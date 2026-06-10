@@ -1,0 +1,10 @@
+# Replace these placeholders with the real GitHub users or teams for your project.
+#
+# Example:
+# * @your-org/security
+# /drone_source/ @your-org/firmware @your-org/security
+# /server_source/ @your-org/backend @your-org/security
+# /drone_transition_source/optee_ta_skeleton/ @your-org/tee @your-org/security
+# /security/ @your-org/security
+# /tools/ @your-org/platform @your-org/security
+# /docs/ @your-org/docs

@@ -6,6 +6,7 @@
 namespace hesia {
 
 struct SecurityPolicy {
+    int schema_version = 1;
     int version = 1;
     bool require_mtls = true;
     bool require_attestation = true;
@@ -13,6 +14,9 @@ struct SecurityPolicy {
     bool incident_mode = false;
     bool require_exporter_binding = true;
     bool require_tee_hkdf = true;
+    bool require_tee_attestation = true;
+    bool require_optee_session_auth = true;
+    bool require_mldsa_sign_in_tee = true;
     bool allow_ephemeral_dilithium = false;
     bool allow_ephemeral_puf = false;
 
@@ -24,6 +28,8 @@ struct SecurityPolicy {
 
     std::size_t max_control_msg_bytes = 10 * 1024 * 1024; // 10 MiB
     std::size_t max_frame_bytes = 2 * 1024 * 1024;        // 2 MiB
+    std::size_t video_send_queue_max = 30;
+    std::uint64_t video_min_send_interval_ms = 0;
 
     std::uint64_t rate_limit_bps = 20'000'000; // 20 Mbps
     std::uint64_t rate_limit_burst = 4'000'000; // 4 MB
@@ -35,6 +41,7 @@ struct SecurityPolicy {
     std::string secure_dir = "/etc/hesia/secure";
     std::string sealed_puf_path = "";
     std::string sealed_dilithium_path = "";
+    std::string optee_session_auth_path = "";
 
     bool require_oem_kdf = false;
     std::string oem_k1_path = "";
@@ -48,6 +55,19 @@ struct SecurityPolicy {
     std::string boot_measure_path = "";
     std::string boot_measure_sig_path = "";
     std::string boot_measure_pubkey_path = "";
+    std::string boot_measure_format = "HESIA_MEASURED_BOOT_V1";
+    std::string boot_measure_expected_source = "";
+    std::uint64_t boot_measure_max_age_sec = 0;
+
+    bool require_asset_manifest = false;
+    std::string asset_manifest_path = "";
+    std::string asset_manifest_sig_path = "";
+    std::string asset_manifest_pubkey_path = "";
+    std::string asset_manifest_format = "HESIA_ASSET_MANIFEST_V1";
+    std::string asset_manifest_expected_slot = "";
+    std::uint64_t asset_manifest_max_age_sec = 0;
+    bool require_ab_slots = false;
+    bool require_rpmb_rollback_storage = true;
 
     bool require_release_signature = false;
     std::string release_target_path = "";

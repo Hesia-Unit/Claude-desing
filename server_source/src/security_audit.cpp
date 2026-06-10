@@ -36,15 +36,28 @@ static void chmod_owner_only(const std::filesystem::path& path) {
 }
 
 static std::string json_escape(const std::string& s) {
+    static const char kHex[] = "0123456789abcdef";
     std::ostringstream oss;
-    for (char c : s) {
+    for (char ch : s) {
+        const unsigned char c = static_cast<unsigned char>(ch);
         switch (c) {
             case '\\': oss << "\\\\"; break;
             case '\"': oss << "\\\""; break;
             case '\n': oss << "\\n"; break;
             case '\r': oss << "\\r"; break;
             case '\t': oss << "\\t"; break;
-            default: oss << c; break;
+            case '\b': oss << "\\b"; break;
+            case '\f': oss << "\\f"; break;
+            default:
+                // Échappe tout caractère de contrôle restant (< 0x20) et DEL
+                // pour garantir un JSON valide et empêcher l'injection de
+                // séparateurs de ligne dans le journal d'audit chaîné.
+                if (c < 0x20 || c == 0x7F) {
+                    oss << "\\u00" << kHex[(c >> 4) & 0x0F] << kHex[c & 0x0F];
+                } else {
+                    oss << ch;
+                }
+                break;
         }
     }
     return oss.str();
@@ -82,7 +95,21 @@ static uint32_t read_u32_be(const uint8_t* p) {
 
 static std::vector<uint8_t> sha256_bytes(const std::vector<uint8_t>& data) {
     std::vector<uint8_t> out(SHA256_DIGEST_LENGTH);
-    SHA256(data.data(), data.size(), out.data());
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) {
+        throw std::runtime_error("EVP_MD_CTX_new failed");
+    }
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1 ||
+        EVP_DigestUpdate(ctx, data.data(), data.size()) != 1) {
+        EVP_MD_CTX_free(ctx);
+        throw std::runtime_error("EVP sha256 init/update failed");
+    }
+    unsigned int out_len = 0;
+    if (EVP_DigestFinal_ex(ctx, out.data(), &out_len) != 1 || out_len != SHA256_DIGEST_LENGTH) {
+        EVP_MD_CTX_free(ctx);
+        throw std::runtime_error("EVP sha256 final failed");
+    }
+    EVP_MD_CTX_free(ctx);
     return out;
 }
 

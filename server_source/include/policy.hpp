@@ -6,9 +6,12 @@
 namespace hesia {
 
 struct SecurityPolicy {
+    int schema_version = 1;
     int version = 1;
     bool require_mtls = true;
     bool require_attestation = true;
+    bool require_tee_attestation = true;
+    bool require_boot_measure_allowlist = true;
     bool prod_fuse = true;
     bool incident_mode = false;
 
@@ -36,6 +39,7 @@ struct SecurityPolicy {
     std::string keys_dir = "/etc/hesia/keys";
     std::string secure_dir = "/etc/hesia/secure";
     std::string drone_pubkey_file = "";
+    std::string drone_tee_pubkey_file = "";
     bool require_pinned_drone_pubkey = false;
 
     std::string forensic_dir = "decrypted_frames";

@@ -1,0 +1,3 @@
+/mnt/c/Users/matis/Documents/Hesia-Firmware/server_source/build-local/CMakeFiles/hesia_server_cpp.dir
+/mnt/c/Users/matis/Documents/Hesia-Firmware/server_source/build-local/CMakeFiles/edit_cache.dir
+/mnt/c/Users/matis/Documents/Hesia-Firmware/server_source/build-local/CMakeFiles/rebuild_cache.dir

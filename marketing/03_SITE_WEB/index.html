@@ -1,0 +1,977 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="HESIA secures European industrial and defense drones with NIST-standardized post-quantum cryptography and hardware-anchored trust. Built for NIS2, CRA, and ANSSI compliance.">
+    <meta name="keywords" content="post-quantum cryptography, drone security, NIS2, CRA, ANSSI, ML-KEM, ML-DSA, OP-TEE, sovereign cybersecurity, European defense">
+    <meta name="author" content="HESIA">
+    <meta property="og:title" content="HESIA — Sovereign security, post-quantum ready">
+    <meta property="og:description" content="Post-quantum cryptography and hardware-anchored trust for European industrial and defense drones.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://hesia.eu">
+    <meta name="twitter:card" content="summary_large_image">
+    <title>HESIA — Sovereign Security, Post-Quantum Ready</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <style>
+        /* ============================================
+           HESIA — Landing Page
+           Brand colors: #0B2545 Steel Blue, #D4A017 Sovereign Gold
+           Fonts: Sora (display), Inter (body), JetBrains Mono (code)
+           ============================================ */
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --primary: #0B2545;
+            --secondary: #D4A017;
+            --dark: #1A1E23;
+            --light: #F5F1E8;
+            --success: #2D7A4D;
+            --danger: #A32020;
+            --gray-100: #F4F6F9;
+            --gray-300: #D8DEE7;
+            --gray-600: #5C6676;
+            --gray-800: #2A303B;
+        }
+
+        html {
+            scroll-behavior: smooth;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-size: 17px;
+            line-height: 1.65;
+            color: var(--dark);
+            background: var(--light);
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        h1, h2, h3, h4 {
+            font-family: 'Sora', 'Inter', sans-serif;
+            font-weight: 600;
+            letter-spacing: -0.015em;
+            line-height: 1.2;
+        }
+
+        h1 { font-size: clamp(2.5rem, 6vw, 4rem); }
+        h2 { font-size: clamp(1.8rem, 4vw, 2.75rem); margin-bottom: 1rem; }
+        h3 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+
+        a { color: inherit; text-decoration: none; }
+
+        /* ============================================
+           Header
+           ============================================ */
+        header {
+            position: sticky;
+            top: 0;
+            background: rgba(245, 241, 232, 0.95);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid var(--gray-300);
+            z-index: 100;
+            padding: 1rem 0;
+        }
+
+        .nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            font-family: 'Sora', sans-serif;
+            font-weight: 600;
+            font-size: 1.5rem;
+            letter-spacing: 0.08em;
+            color: var(--primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .logo-mark {
+            width: 32px;
+            height: 32px;
+            display: inline-block;
+        }
+
+        nav ul {
+            display: flex;
+            gap: 2rem;
+            list-style: none;
+            align-items: center;
+        }
+
+        nav a {
+            font-size: 0.95rem;
+            font-weight: 500;
+            color: var(--dark);
+            transition: color 0.2s;
+        }
+
+        nav a:hover { color: var(--primary); }
+
+        .btn {
+            display: inline-block;
+            padding: 0.75rem 1.5rem;
+            border-radius: 6px;
+            font-weight: 500;
+            font-size: 0.95rem;
+            transition: all 0.2s;
+            cursor: pointer;
+            border: none;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #133257;
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: var(--primary);
+            border: 1.5px solid var(--primary);
+        }
+
+        .btn-secondary:hover {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-gold {
+            background: var(--secondary);
+            color: var(--primary);
+        }
+
+        .btn-gold:hover {
+            background: #B8890E;
+        }
+
+        /* ============================================
+           Hero
+           ============================================ */
+        .hero {
+            background: linear-gradient(135deg, var(--primary) 0%, #133257 100%);
+            color: white;
+            padding: 6rem 0 8rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            right: -20%;
+            width: 60%;
+            height: 100%;
+            background-image: radial-gradient(circle at 50% 50%, rgba(212, 160, 23, 0.15) 0%, transparent 50%);
+            pointer-events: none;
+        }
+
+        .hero-content {
+            max-width: 900px;
+            position: relative;
+        }
+
+        .hero h1 {
+            color: white;
+            margin-bottom: 1.5rem;
+        }
+
+        .hero h1 .gold {
+            color: var(--secondary);
+        }
+
+        .hero-subtitle {
+            font-size: 1.25rem;
+            color: rgba(255, 255, 255, 0.85);
+            margin-bottom: 2.5rem;
+            max-width: 700px;
+            line-height: 1.5;
+        }
+
+        .hero-ctas {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-bottom: 3rem;
+        }
+
+        .hero-trust {
+            display: flex;
+            gap: 1.5rem;
+            align-items: center;
+            padding-top: 2rem;
+            border-top: 1px solid rgba(255, 255, 255, 0.15);
+            flex-wrap: wrap;
+            color: rgba(255, 255, 255, 0.7);
+            font-size: 0.9rem;
+        }
+
+        .hero-trust-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .hero-trust-item::before {
+            content: "●";
+            color: var(--secondary);
+            font-size: 0.6rem;
+        }
+
+        /* ============================================
+           Sections
+           ============================================ */
+        section {
+            padding: 6rem 0;
+        }
+
+        .section-eyebrow {
+            display: inline-block;
+            font-size: 0.875rem;
+            font-weight: 500;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--secondary);
+            margin-bottom: 1rem;
+        }
+
+        .section-title {
+            color: var(--primary);
+            margin-bottom: 1rem;
+        }
+
+        .section-subtitle {
+            font-size: 1.2rem;
+            color: var(--gray-600);
+            max-width: 700px;
+            margin-bottom: 4rem;
+            line-height: 1.6;
+        }
+
+        /* Problem section */
+        .problem {
+            background: white;
+        }
+
+        .problem-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 2rem;
+        }
+
+        .problem-card {
+            padding: 2rem;
+            border: 1px solid var(--gray-300);
+            border-radius: 12px;
+            background: var(--gray-100);
+            transition: all 0.3s;
+        }
+
+        .problem-card:hover {
+            transform: translateY(-4px);
+            border-color: var(--primary);
+            box-shadow: 0 8px 24px rgba(11, 37, 69, 0.08);
+        }
+
+        .problem-card-number {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            color: var(--secondary);
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .problem-card h3 {
+            color: var(--primary);
+            margin-bottom: 0.75rem;
+        }
+
+        .problem-card p {
+            color: var(--gray-800);
+            font-size: 0.95rem;
+        }
+
+        /* Product section */
+        .product {
+            background: var(--light);
+        }
+
+        .product-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 2rem;
+            margin-top: 3rem;
+        }
+
+        .product-card {
+            background: white;
+            padding: 2rem;
+            border-radius: 12px;
+            border: 1px solid var(--gray-300);
+            position: relative;
+            transition: all 0.3s;
+        }
+
+        .product-card.roadmap {
+            opacity: 0.7;
+        }
+
+        .product-card.roadmap::after {
+            content: "Q2 2027";
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            padding: 0.25rem 0.5rem;
+            background: var(--gray-100);
+            color: var(--gray-600);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            border-radius: 4px;
+        }
+
+        .product-card:hover {
+            border-color: var(--primary);
+            transform: translateY(-2px);
+        }
+
+        .product-icon {
+            width: 48px;
+            height: 48px;
+            background: var(--primary);
+            color: var(--secondary);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 1rem;
+            font-family: 'Sora', sans-serif;
+            font-weight: 600;
+            font-size: 1.25rem;
+        }
+
+        .product-card h3 {
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+        }
+
+        .product-card p {
+            font-size: 0.95rem;
+            color: var(--gray-800);
+            margin-bottom: 1rem;
+        }
+
+        .product-card .tech-stack {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            color: var(--gray-600);
+            padding-top: 1rem;
+            border-top: 1px solid var(--gray-300);
+        }
+
+        /* Trust section */
+        .trust {
+            background: var(--primary);
+            color: white;
+        }
+
+        .trust .section-title {
+            color: white;
+        }
+
+        .trust .section-subtitle {
+            color: rgba(255, 255, 255, 0.75);
+        }
+
+        .trust-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 2rem;
+        }
+
+        .trust-card {
+            padding: 2rem;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+        }
+
+        .trust-card h4 {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--secondary);
+            font-size: 0.85rem;
+            letter-spacing: 0.05em;
+            margin-bottom: 1rem;
+            font-weight: 600;
+        }
+
+        .trust-card p {
+            color: rgba(255, 255, 255, 0.85);
+            font-size: 0.95rem;
+        }
+
+        /* Sectors */
+        .sectors {
+            background: white;
+        }
+
+        .sector-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 2rem;
+            margin-top: 3rem;
+        }
+
+        .sector-card {
+            padding: 2rem;
+            border-left: 4px solid var(--secondary);
+            background: var(--gray-100);
+            border-radius: 0 12px 12px 0;
+        }
+
+        .sector-card h3 {
+            color: var(--primary);
+            margin-bottom: 0.75rem;
+        }
+
+        .sector-card p {
+            font-size: 0.95rem;
+            color: var(--gray-800);
+            margin-bottom: 1rem;
+        }
+
+        .sector-card a {
+            color: var(--primary);
+            font-weight: 500;
+            font-size: 0.9rem;
+            border-bottom: 1.5px solid var(--secondary);
+            padding-bottom: 2px;
+        }
+
+        /* Resources */
+        .resources {
+            background: var(--light);
+        }
+
+        .resources-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-top: 3rem;
+        }
+
+        .resource-card {
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid var(--gray-300);
+            transition: all 0.3s;
+        }
+
+        .resource-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 12px 32px rgba(11, 37, 69, 0.1);
+        }
+
+        .resource-card-image {
+            height: 160px;
+            background: linear-gradient(135deg, var(--primary) 0%, #244069 100%);
+            position: relative;
+        }
+
+        .resource-card-type {
+            position: absolute;
+            top: 1rem;
+            left: 1rem;
+            padding: 0.25rem 0.75rem;
+            background: var(--secondary);
+            color: var(--primary);
+            font-size: 0.75rem;
+            font-weight: 600;
+            border-radius: 4px;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .resource-card-body {
+            padding: 1.5rem;
+        }
+
+        .resource-card-meta {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            color: var(--gray-600);
+            margin-bottom: 0.5rem;
+        }
+
+        .resource-card h4 {
+            color: var(--primary);
+            margin-bottom: 0.75rem;
+            font-size: 1.15rem;
+        }
+
+        /* CTA final */
+        .cta {
+            background: linear-gradient(135deg, var(--primary) 0%, #1a3862 100%);
+            color: white;
+            text-align: center;
+        }
+
+        .cta h2 {
+            color: white;
+            margin-bottom: 1rem;
+        }
+
+        .cta p {
+            color: rgba(255, 255, 255, 0.85);
+            font-size: 1.15rem;
+            max-width: 600px;
+            margin: 0 auto 2.5rem;
+        }
+
+        .cta-info {
+            margin-top: 2rem;
+            color: rgba(255, 255, 255, 0.7);
+            font-size: 0.9rem;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* Footer */
+        footer {
+            background: var(--dark);
+            color: var(--gray-300);
+            padding: 4rem 0 2rem;
+        }
+
+        .footer-grid {
+            display: grid;
+            grid-template-columns: 2fr repeat(4, 1fr);
+            gap: 3rem;
+            margin-bottom: 3rem;
+        }
+
+        .footer-brand {
+            color: white;
+        }
+
+        .footer-brand .logo {
+            color: white;
+            margin-bottom: 1rem;
+        }
+
+        .footer-brand p {
+            color: var(--gray-300);
+            font-size: 0.95rem;
+            margin-bottom: 1rem;
+        }
+
+        .footer-brand address {
+            font-style: normal;
+            font-size: 0.9rem;
+            color: var(--gray-300);
+            line-height: 1.6;
+        }
+
+        .footer-column h5 {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            color: var(--secondary);
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            margin-bottom: 1rem;
+        }
+
+        .footer-column ul {
+            list-style: none;
+        }
+
+        .footer-column li {
+            margin-bottom: 0.5rem;
+        }
+
+        .footer-column a {
+            color: var(--gray-300);
+            font-size: 0.9rem;
+            transition: color 0.2s;
+        }
+
+        .footer-column a:hover {
+            color: var(--secondary);
+        }
+
+        .footer-bottom {
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            padding-top: 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.85rem;
+            color: var(--gray-600);
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        .footer-social {
+            display: flex;
+            gap: 1rem;
+        }
+
+        .footer-social a {
+            width: 36px;
+            height: 36px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--gray-300);
+            transition: all 0.2s;
+        }
+
+        .footer-social a:hover {
+            border-color: var(--secondary);
+            color: var(--secondary);
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            nav ul { display: none; }
+            .hero { padding: 4rem 0 6rem; }
+            section { padding: 4rem 0; }
+            .footer-grid { grid-template-columns: 1fr; gap: 2rem; }
+            .footer-bottom { flex-direction: column; align-items: flex-start; }
+        }
+
+        /* Utilities */
+        .center { text-align: center; }
+        .mt-1 { margin-top: 1rem; }
+        .mt-2 { margin-top: 2rem; }
+    </style>
+</head>
+<body>
+
+    <!-- Header -->
+    <header>
+        <div class="container nav">
+            <a href="/" class="logo" aria-label="HESIA homepage">
+                <svg class="logo-mark" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M16 2L28 9V23L16 30L4 23V9L16 2Z" stroke="#0B2545" stroke-width="2" fill="none"/>
+                    <path d="M11 12V20M21 12V20M11 16H21" stroke="#D4A017" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+                HESIA
+            </a>
+            <nav aria-label="Main navigation">
+                <ul>
+                    <li><a href="#product">Product</a></li>
+                    <li><a href="#sectors">Solutions</a></li>
+                    <li><a href="#trust">Security</a></li>
+                    <li><a href="#resources">Resources</a></li>
+                    <li><a href="/company/about">About</a></li>
+                    <li><a href="#cta" class="btn btn-primary">Request a demo</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+
+    <!-- Hero -->
+    <section class="hero">
+        <div class="container hero-content">
+            <h1>
+                Sovereign security,<br>
+                <span class="gold">post-quantum ready.</span>
+            </h1>
+            <p class="hero-subtitle">
+                HESIA secures European industrial and defense drones with NIST-standardized
+                post-quantum cryptography and hardware-anchored trust.
+            </p>
+            <div class="hero-ctas">
+                <a href="#cta" class="btn btn-gold">Request a demo</a>
+                <a href="/resources/whitepapers" class="btn btn-secondary" style="color: white; border-color: white;">Read the whitepaper</a>
+            </div>
+            <div class="hero-trust">
+                <div class="hero-trust-item">Built for NIS2 &amp; CRA</div>
+                <div class="hero-trust-item">ANSSI CSPN on track</div>
+                <div class="hero-trust-item">Open architecture</div>
+                <div class="hero-trust-item">Designed in Europe</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Problem -->
+    <section class="problem" id="problem">
+        <div class="container">
+            <span class="section-eyebrow">The context</span>
+            <h2 class="section-title">Three realities are reshaping drone security.</h2>
+            <p class="section-subtitle">
+                European critical operators, defense programs, and drone integrators all face
+                converging pressures on firmware integrity, data confidentiality, and supply-chain trust.
+            </p>
+            <div class="problem-grid">
+                <div class="problem-card">
+                    <div class="problem-card-number">01 &middot; Regulation</div>
+                    <h3>NIS2 is live.</h3>
+                    <p>Over 100 000 European critical operators must now secure their OT and IoT fleets — including industrial drones. The Cyber Resilience Act enters force in 2027.</p>
+                </div>
+                <div class="problem-card">
+                    <div class="problem-card-number">02 &middot; Cryptographic debt</div>
+                    <h3>Quantum computers are coming.</h3>
+                    <p>By 2030, today's RSA and ECC cryptography will start falling. NIST's August 2024 standards (FIPS 203, 204, 205) are the new baseline. Waiting is not a strategy.</p>
+                </div>
+                <div class="problem-card">
+                    <div class="problem-card-number">03 &middot; Supply chain</div>
+                    <h3>Sovereignty is non-negotiable.</h3>
+                    <p>ITAR, EAR, opaque vendors. Europe's critical infrastructure needs alternatives — built at home, auditable end-to-end, free of geopolitical kill-switches.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Product -->
+    <section class="product" id="product">
+        <div class="container">
+            <span class="section-eyebrow">The product</span>
+            <h2 class="section-title">One secure firmware stack.<br>Four building blocks.</h2>
+            <p class="section-subtitle">
+                HESIA is a software suite that sits between your drone's operating system and its
+                communication stack. We integrate with PX4, ArduPilot, ROS 2 and custom Linux on ARM64.
+            </p>
+            <div class="product-grid">
+                <div class="product-card">
+                    <div class="product-icon">C</div>
+                    <h3>HESIA Core</h3>
+                    <p>Drone firmware hardened with post-quantum key agreement, signature verification, and TEE-anchored identity.</p>
+                    <div class="tech-stack">ML-KEM-1024 &middot; ML-DSA-87 &middot; AES-256-GCM &middot; OP-TEE</div>
+                </div>
+                <div class="product-card">
+                    <div class="product-icon">S</div>
+                    <h3>HESIA Command</h3>
+                    <p>Ground control server with mutual TLS 1.3, Ed25519-signed policy, and allowlist verification at session start.</p>
+                    <div class="tech-stack">TLS 1.3 mTLS &middot; Ed25519 &middot; RFC 5705 exporter</div>
+                </div>
+                <div class="product-card">
+                    <div class="product-icon">V</div>
+                    <h3>HESIA Observe</h3>
+                    <p>End-to-end encrypted video channel with per-frame authenticated encryption and streaming policy enforcement.</p>
+                    <div class="tech-stack">AEAD per-frame &middot; stream policy &middot; replay window</div>
+                </div>
+                <div class="product-card roadmap">
+                    <div class="product-icon">A</div>
+                    <h3>HESIA Attest</h3>
+                    <p>Remote attestation with hardware-bound keys anchored in Tegra fuse or external secure element. Coming Q2 2027.</p>
+                    <div class="tech-stack">Fuse-bound P-384 &middot; measured boot &middot; RATS</div>
+                </div>
+            </div>
+            <div class="mt-2 center">
+                <a href="/security/architecture" class="btn btn-secondary">See the architecture &rarr;</a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Trust -->
+    <section class="trust" id="trust">
+        <div class="container">
+            <span class="section-eyebrow">Our foundations</span>
+            <h2 class="section-title">Built on standards. Audited. Documented.</h2>
+            <p class="section-subtitle">
+                Cryptography is too important for shortcuts. Every primitive we use is standardized,
+                every choice is documented, every implementation is reviewed.
+            </p>
+            <div class="trust-grid">
+                <div class="trust-card">
+                    <h4>NIST FIPS</h4>
+                    <p>ML-KEM-1024 (FIPS 203), ML-DSA-87 (FIPS 204), SHA-3 (FIPS 202), HMAC-SHA256 (FIPS 198-1).</p>
+                </div>
+                <div class="trust-card">
+                    <h4>ANSSI ROADMAP</h4>
+                    <p>On track for CSPN certification in 2027. Common Criteria EAL4+ targeted Q4 2028.</p>
+                </div>
+                <div class="trust-card">
+                    <h4>LIBRARIES</h4>
+                    <p>Cryptographic primitives via OpenSSL 3.x EVP and the vetted liboqs post-quantum library.</p>
+                </div>
+                <div class="trust-card">
+                    <h4>TEE &amp; HARDWARE</h4>
+                    <p>Trusted Application on OP-TEE 4.x, sealing and attestation. External secure-element option for long-term device binding.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Sectors -->
+    <section class="sectors" id="sectors">
+        <div class="container">
+            <span class="section-eyebrow">Who it's for</span>
+            <h2 class="section-title">Designed for the organizations that can't compromise.</h2>
+            <div class="sector-grid">
+                <div class="sector-card">
+                    <h3>Critical infrastructure</h3>
+                    <p>Utilities, transport operators, telecom networks aligning with NIS2 today and preparing for CRA 2027.</p>
+                    <a href="/solutions/critical-infra">Explore for OT teams &rarr;</a>
+                </div>
+                <div class="sector-card">
+                    <h3>Defense &amp; security</h3>
+                    <p>European sovereign programs, law-enforcement drone fleets, intelligence agencies requiring post-quantum roadmap.</p>
+                    <a href="/solutions/defense">Contact defense team &rarr;</a>
+                </div>
+                <div class="sector-card">
+                    <h3>Drone integrators</h3>
+                    <p>OEMs and ODMs embedding HESIA in their PX4, ArduPilot, or ROS 2-based platforms. Partnership terms available.</p>
+                    <a href="/solutions/integrators">Partner with us &rarr;</a>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Resources -->
+    <section class="resources" id="resources">
+        <div class="container">
+            <span class="section-eyebrow">From our research</span>
+            <h2 class="section-title">Technical writing worth your time.</h2>
+            <p class="section-subtitle">
+                We publish deep-dives on the decisions behind HESIA: protocol design, trade-offs,
+                failure modes, and how we measure ourselves.
+            </p>
+            <div class="resources-grid">
+                <article class="resource-card">
+                    <div class="resource-card-image">
+                        <span class="resource-card-type">Whitepaper</span>
+                    </div>
+                    <div class="resource-card-body">
+                        <div class="resource-card-meta">April 2026 &middot; 14 min read</div>
+                        <h4>Post-quantum readiness for industrial drones.</h4>
+                        <p>A practical migration playbook for operators running PX4 / ArduPilot fleets in OT environments.</p>
+                    </div>
+                </article>
+                <article class="resource-card">
+                    <div class="resource-card-image">
+                        <span class="resource-card-type">Blog</span>
+                    </div>
+                    <div class="resource-card-body">
+                        <div class="resource-card-meta">March 2026 &middot; 8 min read</div>
+                        <h4>Binding drone identity to OP-TEE: lessons learned.</h4>
+                        <p>Why we chose sealing over raw storage, and what happens when your platform has no RPMB.</p>
+                    </div>
+                </article>
+                <article class="resource-card">
+                    <div class="resource-card-image">
+                        <span class="resource-card-type">Blog</span>
+                    </div>
+                    <div class="resource-card-body">
+                        <div class="resource-card-meta">February 2026 &middot; 10 min read</div>
+                        <h4>NIS2 compliance for drone operators: a checklist.</h4>
+                        <p>Ten concrete questions you should be able to answer before your next audit.</p>
+                    </div>
+                </article>
+            </div>
+            <div class="mt-2 center">
+                <a href="/resources/blog" class="btn btn-secondary">See all resources &rarr;</a>
+            </div>
+        </div>
+    </section>
+
+    <!-- CTA -->
+    <section class="cta" id="cta">
+        <div class="container">
+            <h2>Ready to secure your fleet?</h2>
+            <p>Book a 30-minute technical deep dive with our cryptography team. No slides, just code, threat models, and honest answers.</p>
+            <a href="/demo" class="btn btn-gold">Request a demo</a>
+            <div class="cta-info">
+                hello@hesia.eu &middot; +33 1 XX XX XX XX
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <div class="container">
+            <div class="footer-grid">
+                <div class="footer-brand">
+                    <div class="logo">
+                        <svg class="logo-mark" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M16 2L28 9V23L16 30L4 23V9L16 2Z" stroke="#D4A017" stroke-width="2" fill="none"/>
+                            <path d="M11 12V20M21 12V20M11 16H21" stroke="white" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                        HESIA
+                    </div>
+                    <p>Sovereign security, post-quantum ready.</p>
+                    <address>
+                        HESIA SAS<br>
+                        14 rue de la République<br>
+                        75001 Paris &middot; France<br>
+                        <br>
+                        contact@hesia.eu<br>
+                        +33 1 XX XX XX XX
+                    </address>
+                </div>
+                <div class="footer-column">
+                    <h5>Product</h5>
+                    <ul>
+                        <li><a href="/product/core">Core</a></li>
+                        <li><a href="/product/command">Command</a></li>
+                        <li><a href="/product/observe">Observe</a></li>
+                        <li><a href="/product/attest">Attest</a></li>
+                    </ul>
+                </div>
+                <div class="footer-column">
+                    <h5>Solutions</h5>
+                    <ul>
+                        <li><a href="/solutions/critical-infra">Critical infra</a></li>
+                        <li><a href="/solutions/defense">Defense</a></li>
+                        <li><a href="/solutions/civil-security">Civil security</a></li>
+                        <li><a href="/solutions/integrators">Integrators</a></li>
+                    </ul>
+                </div>
+                <div class="footer-column">
+                    <h5>Security</h5>
+                    <ul>
+                        <li><a href="/security/architecture">Architecture</a></li>
+                        <li><a href="/security/audits">Audits</a></li>
+                        <li><a href="/security/disclosure">Disclosure policy</a></li>
+                        <li><a href="/security/advisories">Advisories</a></li>
+                    </ul>
+                </div>
+                <div class="footer-column">
+                    <h5>Company</h5>
+                    <ul>
+                        <li><a href="/company/about">About</a></li>
+                        <li><a href="/company/team">Team</a></li>
+                        <li><a href="/company/careers">Careers</a></li>
+                        <li><a href="/company/press">Press</a></li>
+                    </ul>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <div>
+                    Built in Europe &middot; &copy; 2026 HESIA SAS &middot;
+                    <a href="/legal/privacy">Privacy</a> &middot;
+                    <a href="/legal/terms">Terms</a> &middot;
+                    <a href="/legal/imprint">Imprint</a>
+                </div>
+                <div class="footer-social">
+                    <a href="https://linkedin.com/company/hesia" aria-label="LinkedIn">in</a>
+                    <a href="https://x.com/hesia_security" aria-label="X / Twitter">X</a>
+                    <a href="https://youtube.com/@hesia" aria-label="YouTube">YT</a>
+                    <a href="https://github.com/hesia-security" aria-label="GitHub">GH</a>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+</body>
+</html>

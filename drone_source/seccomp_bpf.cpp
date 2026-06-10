@@ -17,11 +17,13 @@
 #pragma comment(lib, "wtsapi32.lib")
 #else
 #include <sys/prctl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include <sched.h>
 #include <cstring>
 
 #ifdef HAVE_LIBSECCOMP
@@ -120,8 +122,9 @@ bool SeccompBPF::initialize(const SeccompConfig& config) {
         SCMP_SYS(fstat), SCMP_SYS(newfstatat), SCMP_SYS(pread64),
 
         // Mémoire / allocation
-        SCMP_SYS(brk), SCMP_SYS(mmap), SCMP_SYS(mprotect), SCMP_SYS(munmap),
+        SCMP_SYS(brk), SCMP_SYS(munmap),
         SCMP_SYS(madvise), SCMP_SYS(mremap),
+        SCMP_SYS(mlock), SCMP_SYS(munlock),
 
         // Signaux / threads
         SCMP_SYS(rt_sigaction), SCMP_SYS(rt_sigprocmask), SCMP_SYS(rt_sigreturn),
@@ -163,6 +166,9 @@ bool SeccompBPF::initialize(const SeccompConfig& config) {
 #ifdef __NR_membarrier
     allowed_syscalls.push_back(SCMP_SYS(membarrier));
 #endif
+#ifdef __NR_mlock2
+    allowed_syscalls.push_back(SCMP_SYS(mlock2));
+#endif
 #ifdef __NR_getcpu
     allowed_syscalls.push_back(SCMP_SYS(getcpu));
 #endif
@@ -191,10 +197,6 @@ bool SeccompBPF::initialize(const SeccompConfig& config) {
 
     if (operational_policy) {
         // Threads / scheduling
-        allowed_syscalls.push_back(SCMP_SYS(clone));
-#ifdef __NR_clone3
-        allowed_syscalls.push_back(SCMP_SYS(clone3));
-#endif
         allowed_syscalls.push_back(SCMP_SYS(sched_yield));
         allowed_syscalls.push_back(SCMP_SYS(sched_getaffinity));
         allowed_syscalls.push_back(SCMP_SYS(sched_setaffinity));
@@ -349,6 +351,107 @@ bool SeccompBPF::initialize(const SeccompConfig& config) {
                                 1,
                                 SCMP_A2(SCMP_CMP_MASKED_EQ, (uint64_t)mask, (uint64_t)value));
     };
+    auto add_arg_masked_eq = [&](uint32_t syscall_nr,
+                                 unsigned arg_index,
+                                 uint64_t mask,
+                                 uint64_t value) -> int {
+        switch (arg_index) {
+            case 0:
+                return seccomp_rule_add(filter_ctx, SCMP_ACT_ALLOW, syscall_nr, 1,
+                                        SCMP_A0(SCMP_CMP_MASKED_EQ, mask, value));
+            case 1:
+                return seccomp_rule_add(filter_ctx, SCMP_ACT_ALLOW, syscall_nr, 1,
+                                        SCMP_A1(SCMP_CMP_MASKED_EQ, mask, value));
+            case 2:
+                return seccomp_rule_add(filter_ctx, SCMP_ACT_ALLOW, syscall_nr, 1,
+                                        SCMP_A2(SCMP_CMP_MASKED_EQ, mask, value));
+            case 3:
+                return seccomp_rule_add(filter_ctx, SCMP_ACT_ALLOW, syscall_nr, 1,
+                                        SCMP_A3(SCMP_CMP_MASKED_EQ, mask, value));
+            default:
+                return -EINVAL;
+        }
+    };
+
+    if (operational_policy) {
+        rc = seccomp_rule_add(filter_ctx, SCMP_ACT_ALLOW, SCMP_SYS(mmap), 0);
+        if (rc != 0) {
+            last_error = "Impossible d'autoriser mmap en mode operationnel (rc=" + std::to_string(rc) + ")";
+            logger->error("seccomp_rule_add(mmap) failed rc=" + std::to_string(rc) +
+                          " (" + std::string(strerror(-rc)) + ")");
+            seccomp_release(filter_ctx);
+            filter_ctx = nullptr;
+            return false;
+        }
+
+        rc = seccomp_rule_add(filter_ctx, SCMP_ACT_ALLOW, SCMP_SYS(mprotect), 0);
+        if (rc != 0) {
+            last_error = "Impossible d'autoriser mprotect en mode operationnel (rc=" + std::to_string(rc) + ")";
+            logger->error("seccomp_rule_add(mprotect) failed rc=" + std::to_string(rc) +
+                          " (" + std::string(strerror(-rc)) + ")");
+            seccomp_release(filter_ctx);
+            filter_ctx = nullptr;
+            return false;
+        }
+    } else {
+        rc = add_arg_masked_eq(SCMP_SYS(mmap), 2, static_cast<uint64_t>(PROT_EXEC), 0);
+        if (rc != 0) {
+            last_error = "Impossible de configurer mmap sans PROT_EXEC (rc=" + std::to_string(rc) + ")";
+            logger->error("seccomp_rule_add(mmap noexec) failed rc=" + std::to_string(rc) +
+                          " (" + std::string(strerror(-rc)) + ")");
+            seccomp_release(filter_ctx);
+            filter_ctx = nullptr;
+            return false;
+        }
+
+        rc = add_arg_masked_eq(SCMP_SYS(mprotect), 2, static_cast<uint64_t>(PROT_EXEC), 0);
+        if (rc != 0) {
+            last_error = "Impossible de configurer mprotect sans PROT_EXEC (rc=" + std::to_string(rc) + ")";
+            logger->error("seccomp_rule_add(mprotect noexec) failed rc=" + std::to_string(rc) +
+                          " (" + std::string(strerror(-rc)) + ")");
+            seccomp_release(filter_ctx);
+            filter_ctx = nullptr;
+            return false;
+        }
+    }
+
+    if (operational_policy) {
+        uint64_t forbidden_clone_flags = 0;
+#ifdef CLONE_NEWNS
+        forbidden_clone_flags |= static_cast<uint64_t>(CLONE_NEWNS);
+#endif
+#ifdef CLONE_NEWCGROUP
+        forbidden_clone_flags |= static_cast<uint64_t>(CLONE_NEWCGROUP);
+#endif
+#ifdef CLONE_NEWUTS
+        forbidden_clone_flags |= static_cast<uint64_t>(CLONE_NEWUTS);
+#endif
+#ifdef CLONE_NEWIPC
+        forbidden_clone_flags |= static_cast<uint64_t>(CLONE_NEWIPC);
+#endif
+#ifdef CLONE_NEWUSER
+        forbidden_clone_flags |= static_cast<uint64_t>(CLONE_NEWUSER);
+#endif
+#ifdef CLONE_NEWPID
+        forbidden_clone_flags |= static_cast<uint64_t>(CLONE_NEWPID);
+#endif
+#ifdef CLONE_NEWNET
+        forbidden_clone_flags |= static_cast<uint64_t>(CLONE_NEWNET);
+#endif
+        rc = add_arg_masked_eq(SCMP_SYS(clone), 0, forbidden_clone_flags, 0);
+        if (rc != 0) {
+            last_error = "Impossible de configurer clone sans namespaces (rc=" + std::to_string(rc) + ")";
+            logger->error("seccomp_rule_add(clone namespace filter) failed rc=" + std::to_string(rc) +
+                          " (" + std::string(strerror(-rc)) + ")");
+            seccomp_release(filter_ctx);
+            filter_ctx = nullptr;
+            return false;
+        }
+#ifdef __NR_clone3
+        // clone3 cannot be argument-filtered safely with libseccomp because the first
+        // parameter is a userspace pointer to struct clone_args. Keep it disabled.
+#endif
+    }
 
     if (operational_policy) {
         rc = seccomp_rule_add(filter_ctx, SCMP_ACT_ALLOW, SCMP_SYS(openat), 0);

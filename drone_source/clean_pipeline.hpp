@@ -21,6 +21,7 @@ struct FrameData {
     cv::Mat original_frame;
     cv::Mat yolo_result;
     cv::Mat midas_result;
+    cv::Mat midas_depth_map;
     std::map<int, Detection> yolo_detections;
     std::vector<float> yolo_state;        // Format fixe pour modele sequentiel (Mamba)
     std::vector<float> deep_skel_state;
@@ -79,6 +80,9 @@ private:
 
     bool mamba_log_enabled{false};
     int mamba_log_batch{50};
+    bool m2b_trace_enabled{false};
+    int m2b_trace_every_n{15};
+    std::filesystem::path m2b_trace_dir;
     
     // Callback pour envoyer les frames
     std::function<void(const cv::Mat&, const cv::Mat&, int)> frame_callback;

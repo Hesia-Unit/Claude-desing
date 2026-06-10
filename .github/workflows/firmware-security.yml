@@ -1,0 +1,114 @@
+name: firmware-security
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 2 * * *'
+
+jobs:
+  hygiene-and-fuzz:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build python3 shellcheck libssl-dev libspdlog-dev
+
+      - name: Configure unit tests
+        run: cmake -S tests/unit -B build/unit -G Ninja -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Build unit tests
+        run: cmake --build build/unit --parallel
+
+      - name: Run secure channel unit tests
+        run: ./build/unit/hesia_secure_channel_tests
+
+      - name: Check opaque binaries
+        run: python3 tools/check_opaque_binaries.py --repo .
+
+      - name: Check tracked private keys
+        run: python3 tools/check_versioned_private_keys.py --repo .
+
+      - name: ShellCheck
+        run: |
+          find tools server_source/tools drone_transition_source/scripts -type f -name '*.sh' -print0 \
+            | xargs -0 shellcheck --severity=warning
+
+      - name: Check declared dependencies
+        run: python3 tools/check_declared_dependencies.py --repo .
+
+      - name: Check documentation links
+        run: python3 tools/check_doc_links.py --root .
+
+      - name: Generate firmware SBOM
+        run: python3 tools/generate_firmware_sbom.py --repo . --output artifacts/firmware-sbom.json
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+      - name: Configure fuzzers
+        run: cmake -S tests/fuzz -B build/fuzz -G Ninja -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Build fuzzers
+        run: cmake --build build/fuzz --parallel
+
+      - name: Verify reproducible build
+        run: python3 tools/verify_reproducible_build.py --repo . --build-script tools/build_repro_targets.sh --artifact build/fuzz/hesia_fuzz_serialization --artifact build/fuzz/hesia_fuzz_video_packet --artifact build/fuzz/hesia_fuzz_telemetry --output artifacts/reproducible-build.json
+
+      - name: Run serialization fuzzer smoke
+        run: ./build/fuzz/hesia_fuzz_serialization -runs=2000
+
+      - name: Run video packet fuzzer smoke
+        run: ./build/fuzz/hesia_fuzz_video_packet -runs=2000
+
+      - name: Run telemetry fuzzer smoke
+        run: ./build/fuzz/hesia_fuzz_telemetry -runs=2000
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-sbom
+          path: artifacts/firmware-sbom.json
+
+      - name: Upload reproducibility report
+        uses: actions/upload-artifact@v4
+        with:
+          name: reproducible-build
+          path: artifacts/reproducible-build.json
+
+  nightly-fuzz:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly fuzz toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build python3
+
+      - name: Configure fuzzers
+        run: cmake -S tests/fuzz -B build/fuzz -G Ninja -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Build fuzzers
+        run: cmake --build build/fuzz --parallel
+
+      - name: Run serialization fuzzer nightly
+        run: ./build/fuzz/hesia_fuzz_serialization -max_total_time=1200
+
+      - name: Run video packet fuzzer nightly
+        run: ./build/fuzz/hesia_fuzz_video_packet -max_total_time=1200
+
+      - name: Run telemetry fuzzer nightly
+        run: ./build/fuzz/hesia_fuzz_telemetry -max_total_time=1200

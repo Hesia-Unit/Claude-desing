@@ -42,6 +42,8 @@ package body Hesia_Sentinel_Core is
             Hesia_Sentinel_Util.To_Lower (Cpu_Hash)
          then
             Ada.Text_IO.Put_Line ("[SENTINEL] cpu_hash mismatch");
+            Ada.Text_IO.Put_Line ("[SENTINEL] expected_cpu_hash=" & Exp_Cpu);
+            Ada.Text_IO.Put_Line ("[SENTINEL] actual_cpu_hash=" & Cpu_Hash);
             Status := 2;
          end if;
 
@@ -49,6 +51,8 @@ package body Hesia_Sentinel_Core is
             Hesia_Sentinel_Util.To_Lower (Storage_Hash)
          then
             Ada.Text_IO.Put_Line ("[SENTINEL] storage_hash mismatch");
+            Ada.Text_IO.Put_Line ("[SENTINEL] expected_storage_hash=" & Exp_Storage);
+            Ada.Text_IO.Put_Line ("[SENTINEL] actual_storage_hash=" & Storage_Hash);
             Status := 2;
          end if;
 

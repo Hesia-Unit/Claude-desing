@@ -1,0 +1,64 @@
+{
+  "mode": "synthetic",
+  "frames": 8,
+  "video": "C:\\Users\\matis\\Documents\\Hesia-Firmware\\docs\\generated\\hesia_m2b_viewer.mp4",
+  "contact_sheet": "C:\\Users\\matis\\Documents\\Hesia-Firmware\\docs\\generated\\hesia_m2b_viewer_contact_sheet.jpg",
+  "summary": [
+    {
+      "frame": 0.0,
+      "risk": 0.009770252741873264,
+      "reward": -0.5744099080562591,
+      "distance_to_goal": 3.638575315475464,
+      "expert_l1": 0.5724722146987915
+    },
+    {
+      "frame": 1.0,
+      "risk": 0.009770252741873264,
+      "reward": -0.5386087872087955,
+      "distance_to_goal": 3.576343536376953,
+      "expert_l1": 0.043145135045051575
+    },
+    {
+      "frame": 2.0,
+      "risk": 0.009788339957594872,
+      "reward": -0.5219005845487117,
+      "distance_to_goal": 3.4643523693084717,
+      "expert_l1": 0.044954583048820496
+    },
+    {
+      "frame": 3.0,
+      "risk": 0.007987155579030514,
+      "reward": -0.4991083838045597,
+      "distance_to_goal": 3.3125154972076416,
+      "expert_l1": 0.04462118446826935
+    },
+    {
+      "frame": 4.0,
+      "risk": 0.006677364464849234,
+      "reward": -0.47232533320784564,
+      "distance_to_goal": 3.1287357807159424,
+      "expert_l1": 0.06029932200908661
+    },
+    {
+      "frame": 5.0,
+      "risk": 0.00498606264591217,
+      "reward": -0.44241422861814494,
+      "distance_to_goal": 2.919318437576294,
+      "expert_l1": 0.09032925963401794
+    },
+    {
+      "frame": 6.0,
+      "risk": 0.0038642832078039646,
+      "reward": -0.4093862198293209,
+      "distance_to_goal": 2.6893198490142822,
+      "expert_l1": 0.11976484954357147
+    },
+    {
+      "frame": 7.0,
+      "risk": 0.0028981638606637716,
+      "reward": -0.37362061589956286,
+      "distance_to_goal": 2.4427669048309326,
+      "expert_l1": 0.14411160349845886
+    }
+  ]
+}

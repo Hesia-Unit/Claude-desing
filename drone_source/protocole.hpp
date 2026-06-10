@@ -55,6 +55,10 @@ struct BlockDroneAuth {
     std::vector<uint8_t> session_id;          // 16 octets
     std::vector<uint8_t> transcript_hash;     // 64 octets (SHA3-512)
     std::vector<uint8_t> server_cert_sha256;  // 32 octets (SHA-256 du cert serveur DER vu côté drone)
+    std::vector<uint8_t> boot_measure_digest;       // 64 octets (SHA3-512 du rapport de measured boot)
+    // Attestation TEE: ML-DSA-87 prefere, P-256 legacy encore acceptee cote serveur.
+    std::vector<uint8_t> tee_attestation_pubkey;
+    std::vector<uint8_t> tee_attestation_signature;
 };
 
 struct BlockServerAuth {

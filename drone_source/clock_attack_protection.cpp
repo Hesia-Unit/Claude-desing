@@ -1,10 +1,12 @@
 #include "clock_attack_protection.hpp"
 #include "hardware_monitor.hpp"
+#include "security_utils.hpp"
 #include <iostream>
 #include <algorithm>
 #include <cmath>
 #include <random>
 #include <chrono>
+#include <cstdlib>
 
 #ifdef _WIN32
 #include <intrin.h>
@@ -27,6 +29,50 @@ static inline uint64_t __rdtsc() {
 
 namespace hesia {
 
+namespace {
+
+constexpr std::size_t kJammingWindowSamples = 32;
+constexpr std::size_t kJammingWarmupSamples = 48;
+constexpr double kMinStableFrequencyMhz = 1.0;
+constexpr double kStableFrequencySpreadRatio = 0.02;
+constexpr double kArmJammingThresholdNs = 50000.0;
+constexpr std::uint32_t kRequiredConsecutiveJammingWindows = 3;
+
+std::atomic<double> g_jamming_baseline_ns{0.0};
+std::atomic<std::uint32_t> g_consecutive_jamming_windows{0};
+
+uint64_t secure_seed64() {
+    uint64_t seed = 0;
+    if (!SecureRNG::generate_bytes(reinterpret_cast<uint8_t*>(&seed), sizeof(seed))) {
+        throw std::runtime_error("SecureRNG::generate_bytes failed for clock protection seed");
+    }
+    return seed;
+}
+
+bool has_invariant_cycle_counter()
+{
+#if defined(_WIN32) || defined(__x86_64__) || defined(__i386__)
+    return true;
+#else
+    return false;
+#endif
+}
+
+void apply_clock_path_env_overrides()
+{
+    if (const char* path = std::getenv("HESIA_CPUINFO_PATH"); path && *path) {
+        ClockAttackProtection::set_cpuinfo_path(path);
+    }
+    if (const char* path = std::getenv("HESIA_UPTIME_PATH"); path && *path) {
+        ClockAttackProtection::set_time_path(path);
+    }
+    if (const char* path = std::getenv("HESIA_CLOCK_SOURCE_PATH"); path && *path) {
+        ClockAttackProtection::set_clock_source_path(path);
+    }
+}
+
+} // namespace
+
 // ===== INITIALISATION DES MEMBRES STATIQUES =====
 
 std::atomic<bool> ClockAttackProtection::clock_monitor_active{false};
@@ -45,38 +91,41 @@ std::string ClockAttackProtection::clock_source_path = "/sys/devices/system/cloc
 // ===== FONCTIONS DE MONITORING =====
 
 bool ClockAttackProtection::initialize(double nominal_freq_mhz) {
-    std::cout << "🕐 Initialisation ClockAttackProtection..." << std::endl;
+    std::cout << "Ã°Å¸â€¢Â Initialisation ClockAttackProtection..." << std::endl;
     
+    apply_clock_path_env_overrides();
     nominal_frequency = nominal_freq_mhz;
     anomaly_count = 0;
     clock_history.clear();
+    g_jamming_baseline_ns = 0.0;
+    g_consecutive_jamming_windows = 0;
     
-    // Calibration de la fréquence nominale
+    // Calibration de la frÃƒÂ©quence nominale
     if (!calibrate_nominal_frequency()) {
-        std::cerr << "❌ Échec calibration fréquence nominale" << std::endl;
+        std::cerr << "Ã¢ÂÅ’ Ãƒâ€°chec calibration frÃƒÂ©quence nominale" << std::endl;
         return false;
     }
     
-    // Vérification de l'intégrité de la source clock
+    // VÃƒÂ©rification de l'intÃƒÂ©gritÃƒÂ© de la source clock
     if (!verify_clock_source_integrity()) {
-        std::cerr << "⚠️ Source clock non sécurisée détectée" << std::endl;
+        std::cerr << "Ã¢Å¡Â Ã¯Â¸Â Source clock non sÃƒÂ©curisÃƒÂ©e dÃƒÂ©tectÃƒÂ©e" << std::endl;
     }
     
-    std::cout << "✅ ClockAttackProtection initialisé (freq nominale: " 
+    std::cout << "Ã¢Å“â€¦ ClockAttackProtection initialisÃƒÂ© (freq nominale: " 
               << nominal_frequency << " MHz)" << std::endl;
     return true;
 }
 
 bool ClockAttackProtection::start_clock_monitoring() {
     if (clock_monitor_active.load()) {
-        std::cout << "⚠️ Monitoring clock déjà actif" << std::endl;
+        std::cout << "Ã¢Å¡Â Ã¯Â¸Â Monitoring clock dÃƒÂ©jÃƒÂ  actif" << std::endl;
         return true;
     }
     
     clock_monitor_active = true;
     monitoring_thread = std::thread(clock_monitoring_loop);
     
-    std::cout << "🕐 Monitoring clock démarré" << std::endl;
+    std::cout << "Ã°Å¸â€¢Â Monitoring clock dÃƒÂ©marrÃƒÂ©" << std::endl;
     return true;
 }
 
@@ -90,7 +139,7 @@ void ClockAttackProtection::stop_clock_monitoring() {
         monitoring_thread.join();
     }
     
-    std::cout << "🕐 Monitoring clock arrêté" << std::endl;
+    std::cout << "Ã°Å¸â€¢Â Monitoring clock arrÃƒÂªtÃƒÂ©" << std::endl;
 }
 
 bool ClockAttackProtection::is_monitoring_active() {
@@ -102,19 +151,19 @@ bool ClockAttackProtection::is_clock_source_secure() {
 }
 
 void ClockAttackProtection::clock_monitoring_loop() {
-    std::cout << "🔄 Démarrage boucle monitoring clock..." << std::endl;
+    std::cout << "Ã°Å¸â€â€ž DÃƒÂ©marrage boucle monitoring clock..." << std::endl;
     
     while (clock_monitor_active.load()) {
         try {
             ClockSample sample = read_clock_sample();
             
-            // Ajouter à l'historique
+            // Ajouter ÃƒÂ  l'historique
             clock_history.push_back(sample);
             if (clock_history.size() > 1000) {
                 clock_history.erase(clock_history.begin());
             }
             
-            // Détection d'anomalies
+            // DÃƒÂ©tection d'anomalies
             if (detect_frequency_manipulation(sample)) {
                 anomaly_count++;
                 trigger_clock_attack_response();
@@ -131,24 +180,24 @@ void ClockAttackProtection::clock_monitoring_loop() {
             }
             
         } catch (const std::exception& e) {
-            std::cerr << "❌ Erreur monitoring clock: " << e.what() << std::endl;
+            std::cerr << "Ã¢ÂÅ’ Erreur monitoring clock: " << e.what() << std::endl;
         }
 
         if (ExternalWatchdog::is_active()) {
             ExternalWatchdog::pet_watchdog();
         }
         
-        // Pause de 100ms entre les échantillons
+        // Pause de 100ms entre les ÃƒÂ©chantillons
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     
-    std::cout << "🔄 Boucle monitoring clock terminée" << std::endl;
+    std::cout << "Ã°Å¸â€â€ž Boucle monitoring clock terminÃƒÂ©e" << std::endl;
 }
 
 ClockAttackProtection::ClockSample ClockAttackProtection::read_clock_sample() {
     ClockSample sample;
     
-    // Lire la fréquence CPU
+    // Lire la frÃƒÂ©quence CPU
     sample.frequency_mhz = read_cpu_frequency();
     
     // Lire le timestamp
@@ -206,17 +255,34 @@ double ClockAttackProtection::calculate_jitter(const ClockSample& current) {
     if (clock_history.empty()) {
         return 0.0;
     }
+
+    {
+        const ClockSample& previous_sample = clock_history.back();
+        const double time_diff = (current.timestamp - previous_sample.timestamp) / 1000000000.0;
+        if (!std::isfinite(time_diff) || time_diff <= 0.0) {
+            return 0.0;
+        }
+#if !defined(_WIN32) && !defined(__x86_64__) && !defined(__i386__)
+        // Sur ARM/Jetson, le fallback __rdtsc() n'est pas un compteur invariant.
+        // Un jitter dÃƒÂ©rivÃƒÂ© des transitions DVFS remonte des faux positifs massifs.
+        (void)current;
+        return 0.0;
+#else
+        const double freq_diff = std::abs(current.frequency_mhz - previous_sample.frequency_mhz);
+        return (freq_diff / time_diff) * 1000.0;
+#endif
+    }
     
     const ClockSample& previous = clock_history.back();
     
-    // Calculer le jitter basé sur la différence de fréquence
+    // Calculer le jitter basÃƒÂ© sur la diffÃƒÂ©rence de frÃƒÂ©quence
     double freq_diff = std::abs(current.frequency_mhz - previous.frequency_mhz);
     double time_diff = (current.timestamp - previous.timestamp) / 1000000000.0; // secondes
     
     return (freq_diff / time_diff) * 1000.0; // nanosecondes
 }
 
-// ===== DÉTECTION D'ATTAQUES =====
+// ===== DÃƒâ€°TECTION D'ATTAQUES =====
 
 bool ClockAttackProtection::detect_frequency_manipulation(const ClockSample& current) {
     double nominal = nominal_frequency.load();
@@ -225,7 +291,7 @@ bool ClockAttackProtection::detect_frequency_manipulation(const ClockSample& cur
     double deviation = std::abs(current.frequency_mhz - nominal);
     
     if (deviation > tolerance) {
-        std::cout << "🚨 Manipulation fréquence détectée: " 
+        std::cout << "Ã°Å¸Å¡Â¨ Manipulation frÃƒÂ©quence dÃƒÂ©tectÃƒÂ©e: " 
                   << current.frequency_mhz << " MHz (deviation: " 
                   << deviation << " MHz)" << std::endl;
         return true;
@@ -235,23 +301,82 @@ bool ClockAttackProtection::detect_frequency_manipulation(const ClockSample& cur
 }
 
 bool ClockAttackProtection::detect_clock_jamming(const ClockSample& current) {
-    if (clock_history.size() < 10) {
+    (void)current;
+
+    if (!has_invariant_cycle_counter()) {
         return false;
     }
-    
-    // Analyser les 10 derniers échantillons
+    if (clock_history.size() < kJammingWarmupSamples) {
+        return false;
+    }
+    if (!clock_source_secure.load()) {
+        g_consecutive_jamming_windows = 0;
+        return false;
+    }
+
+    const std::size_t start = clock_history.size() - kJammingWindowSamples;
+    double min_freq = std::numeric_limits<double>::infinity();
+    double max_freq = 0.0;
+    double avg_freq = 0.0;
+    std::size_t valid = 0;
+    for (std::size_t i = start; i < clock_history.size(); ++i) {
+        const double freq = clock_history[i].frequency_mhz;
+        if (!std::isfinite(freq) || freq < kMinStableFrequencyMhz) {
+            continue;
+        }
+        min_freq = std::min(min_freq, freq);
+        max_freq = std::max(max_freq, freq);
+        avg_freq += freq;
+        ++valid;
+    }
+    if (valid < kJammingWindowSamples / 2) {
+        g_consecutive_jamming_windows = 0;
+        return false;
+    }
+
+    avg_freq /= static_cast<double>(valid);
+    if (!std::isfinite(avg_freq) || avg_freq < kMinStableFrequencyMhz) {
+        g_consecutive_jamming_windows = 0;
+        return false;
+    }
+
+    const double spread_ratio = (max_freq - min_freq) / avg_freq;
+    if (spread_ratio > kStableFrequencySpreadRatio) {
+        g_consecutive_jamming_windows = 0;
+        return false;
+    }
+
     double avg_jitter = 0.0;
-    for (size_t i = clock_history.size() - 10; i < clock_history.size(); i++) {
+    for (std::size_t i = start; i < clock_history.size(); ++i) {
         avg_jitter += clock_history[i].jitter_ns;
     }
-    avg_jitter /= 10.0;
-    
-    if (avg_jitter > jitter_threshold_ns.load()) {
-        std::cout << "🚨 Clock jamming détecté (jitter moyen: " 
-                  << avg_jitter << " ns)" << std::endl;
+    avg_jitter /= static_cast<double>(kJammingWindowSamples);
+
+    double baseline = g_jamming_baseline_ns.load();
+    if (baseline <= 0.0 || avg_jitter < baseline) {
+        g_jamming_baseline_ns = avg_jitter;
+        baseline = avg_jitter;
+    } else {
+        g_jamming_baseline_ns = (baseline * 0.95) + (avg_jitter * 0.05);
+        baseline = g_jamming_baseline_ns.load();
+    }
+
+    const double adaptive_threshold = std::max<double>(
+        static_cast<double>(jitter_threshold_ns.load()),
+        std::max(kArmJammingThresholdNs, baseline * 5.0));
+
+    if (avg_jitter > adaptive_threshold) {
+        const std::uint32_t consecutive = g_consecutive_jamming_windows.fetch_add(1) + 1;
+        if (consecutive < kRequiredConsecutiveJammingWindows) {
+            return false;
+        }
+        std::cout << "[CLOCK] Jamming detected (avg jitter="
+                  << avg_jitter << " ns, baseline=" << baseline
+                  << " ns, spread=" << (spread_ratio * 100.0) << "%)" << std::endl;
         return true;
     }
-    
+
+    g_consecutive_jamming_windows = 0;
     return false;
 }
 
@@ -262,12 +387,12 @@ bool ClockAttackProtection::detect_clock_glitch(const ClockSample& current) {
     
     const ClockSample& previous = clock_history[clock_history.size() - 2];
     
-    // Détection de saut soudain de fréquence
+    // DÃƒÂ©tection de saut soudain de frÃƒÂ©quence
     double freq_change = std::abs(current.frequency_mhz - previous.frequency_mhz);
     double time_diff = (current.timestamp - previous.timestamp) / 1000000.0; // ms
     
     if (time_diff > 0 && freq_change / time_diff > 100.0) { // 100 MHz/ms
-        std::cout << "🚨 Clock glitch détecté (changement: " 
+        std::cout << "Ã°Å¸Å¡Â¨ Clock glitch dÃƒÂ©tectÃƒÂ© (changement: " 
                   << freq_change << " MHz en " << time_diff << " ms)" << std::endl;
         return true;
     }
@@ -280,7 +405,7 @@ bool ClockAttackProtection::detect_underclock_attack(const ClockSample& current)
     double threshold = nominal * 0.8; // 80% de la nominale
     
     if (current.frequency_mhz < threshold) {
-        std::cout << "🚨 Underclock attack détectée: " 
+        std::cout << "Ã°Å¸Å¡Â¨ Underclock attack dÃƒÂ©tectÃƒÂ©e: " 
                   << current.frequency_mhz << " MHz" << std::endl;
         return true;
     }
@@ -293,7 +418,7 @@ bool ClockAttackProtection::detect_overclock_attack(const ClockSample& current) 
     double threshold = nominal * 1.2; // 120% de la nominale
     
     if (current.frequency_mhz > threshold) {
-        std::cout << "🚨 Overclock attack détectée: " 
+        std::cout << "Ã°Å¸Å¡Â¨ Overclock attack dÃƒÂ©tectÃƒÂ©e: " 
                   << current.frequency_mhz << " MHz" << std::endl;
         return true;
     }
@@ -304,11 +429,11 @@ bool ClockAttackProtection::detect_overclock_attack(const ClockSample& current) 
 // ===== CONTRE-MESURES =====
 
 void ClockAttackProtection::implement_clock_stabilization() {
-    std::cout << "🛡️ Implémentation stabilisation clock..." << std::endl;
+    std::cout << "Ã°Å¸â€ºÂ¡Ã¯Â¸Â ImplÃƒÂ©mentation stabilisation clock..." << std::endl;
     
     // Activer les contre-mesures de stabilisation
 #ifdef _WIN32
-    // Windows: ajuster les paramètres de performance
+    // Windows: ajuster les paramÃƒÂ¨tres de performance
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 #else
     // Linux: ajuster la politique du scheduler
@@ -318,8 +443,7 @@ void ClockAttackProtection::implement_clock_stabilization() {
 #endif
     
     // Ajouter du bruit pour contrer les attaques
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    std::mt19937 gen(static_cast<std::mt19937::result_type>(secure_seed64()));
     std::uniform_int_distribution<> delay_dist(1, 10);
     
     for (int i = 0; i < 10; i++) {
@@ -328,25 +452,25 @@ void ClockAttackProtection::implement_clock_stabilization() {
 }
 
 void ClockAttackProtection::enable_secure_clock_source() {
-    std::cout << "🔒 Activation source clock sécurisée..." << std::endl;
+    std::cout << "Ã°Å¸â€â€™ Activation source clock sÃƒÂ©curisÃƒÂ©e..." << std::endl;
     
-    // Essayer de basculer vers une source clock sécurisée
+    // Essayer de basculer vers une source clock sÃƒÂ©curisÃƒÂ©e
 #ifdef _WIN32
     // Windows: utiliser QueryPerformanceCounter
     LARGE_INTEGER freq;
     QueryPerformanceFrequency(&freq);
     if (freq.QuadPart > 0) {
-        std::cout << "✅ Source clock haute résolution activée" << std::endl;
+        std::cout << "Ã¢Å“â€¦ Source clock haute rÃƒÂ©solution activÃƒÂ©e" << std::endl;
     }
 #else
-    // Linux: vérifier et utiliser clocksource sécurisée
+    // Linux: vÃƒÂ©rifier et utiliser clocksource sÃƒÂ©curisÃƒÂ©e
     std::ifstream clocksource(clock_source_path);
     std::string source;
     if (clocksource >> source) {
         if (source == "tsc" || source == "hpet" || source == "arch_sys_counter" || source == "arm_arch_timer") {
-            std::cout << "✅ Source clock sécurisée: " << source << std::endl;
+            std::cout << "Ã¢Å“â€¦ Source clock sÃƒÂ©curisÃƒÂ©e: " << source << std::endl;
         } else {
-            std::cout << "⚠️ Source clock non sécurisée: " << source << std::endl;
+            std::cout << "Ã¢Å¡Â Ã¯Â¸Â Source clock non sÃƒÂ©curisÃƒÂ©e: " << source << std::endl;
         }
     }
 #endif
@@ -363,9 +487,9 @@ void ClockAttackProtection::trigger_clock_attack_response() {
 // ===== FONCTIONS PUBLIQUES =====
 
 bool ClockAttackProtection::calibrate_nominal_frequency() {
-    std::cout << "⚙️ Calibration fréquence nominale..." << std::endl;
+    std::cout << "Ã¢Å¡â„¢Ã¯Â¸Â Calibration frÃƒÂ©quence nominale..." << std::endl;
     
-    // Prendre 10 échantillons pour calibrer
+    // Prendre 10 ÃƒÂ©chantillons pour calibrer
     double total_freq = 0.0;
     int valid_samples = 0;
     
@@ -381,7 +505,7 @@ bool ClockAttackProtection::calibrate_nominal_frequency() {
     if (valid_samples > 0) {
         double avg_freq = total_freq / valid_samples;
         nominal_frequency = avg_freq;
-        std::cout << "✅ Fréquence nominale calibrée: " << avg_freq << " MHz" << std::endl;
+        std::cout << "Ã¢Å“â€¦ FrÃƒÂ©quence nominale calibrÃƒÂ©e: " << avg_freq << " MHz" << std::endl;
         return true;
     }
     
@@ -445,9 +569,16 @@ void ClockAttackProtection::enable_clock_monitoring() {
 }
 
 void ClockAttackProtection::implement_clock_jamming_detection() {
-    jitter_threshold_ns = 500; // 500 nanosecondes
-    frequency_tolerance_percent = 2.0; // 2% de tolérance
-    std::cout << "🛡️ Détection clock jamming configurée" << std::endl;
+    if (!has_invariant_cycle_counter()) {
+        jitter_threshold_ns = static_cast<uint64_t>(kArmJammingThresholdNs);
+        frequency_tolerance_percent = 5.0;
+        std::cout << "[CLOCK] Active jamming detection disabled on this platform (no invariant cycle counter)" << std::endl;
+        return;
+    }
+
+    jitter_threshold_ns = 5000;
+    frequency_tolerance_percent = 2.0;
+    std::cout << "[CLOCK] Jamming detection configured" << std::endl;
 }
 
 void ClockAttackProtection::setup_secure_clock_source() {
@@ -455,14 +586,14 @@ void ClockAttackProtection::setup_secure_clock_source() {
 }
 
 bool ClockAttackProtection::test_clock_protection() {
-    std::cout << "🧪 Test protection clock..." << std::endl;
+    std::cout << "Ã°Å¸Â§Âª Test protection clock..." << std::endl;
     
-    // Test de détection de manipulation
+    // Test de dÃƒÂ©tection de manipulation
     double original_freq = nominal_frequency.load();
     nominal_frequency = 1000.0; // Simuler manipulation
     
     ClockSample test_sample;
-    test_sample.frequency_mhz = 500.0; // Fréquence anormale
+    test_sample.frequency_mhz = 500.0; // FrÃƒÂ©quence anormale
     test_sample.timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::high_resolution_clock::now().time_since_epoch()).count();
     
@@ -470,7 +601,7 @@ bool ClockAttackProtection::test_clock_protection() {
     
     nominal_frequency = original_freq; // Restaurer
     
-    std::cout << "Test clock protection: " << (detection_works ? "✅ PASS" : "❌ FAIL") << std::endl;
+    std::cout << "Test clock protection: " << (detection_works ? "Ã¢Å“â€¦ PASS" : "Ã¢ÂÅ’ FAIL") << std::endl;
     return detection_works;
 }
 
@@ -537,7 +668,7 @@ ClockAttackProtection::ClockHealth ClockAttackProtection::get_clock_health() {
     size_t check_samples = std::min(clock_history.size(), static_cast<size_t>(50));
     
     for (size_t i = clock_history.size() - check_samples; i < clock_history.size(); i++) {
-        // Simuler la détection d'anomalies (à implémenter correctement)
+        // Simuler la dÃƒÂ©tection d'anomalies (ÃƒÂ  implÃƒÂ©menter correctement)
         if (detect_frequency_manipulation(clock_history[i])) {
             recent_anomalies++;
         }

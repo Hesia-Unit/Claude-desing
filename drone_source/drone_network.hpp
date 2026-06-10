@@ -72,13 +72,13 @@ private:
     Stats stats;
 
     // TLS 1.3 transport (mTLS required)
-    bool tls_enabled{true};
-    bool tls_verify_peer{true};
-    bool tls_pin_server_pubkey{false};
-    uint64_t tls_rekey_bytes_threshold{32ULL * 1024ULL * 1024ULL}; // 32 MiB
+    const bool tls_enabled;
+    const bool tls_verify_peer;
+    const bool tls_pin_server_pubkey;
+    const uint64_t tls_rekey_bytes_threshold;
     uint64_t tls_bytes_since_rekey{0};
     std::chrono::steady_clock::time_point tls_last_rekey;
-    int tls_rekey_seconds{300}; // 5 minutes
+    const int tls_rekey_seconds;
     std::unique_ptr<TLSChannel> tls;
     
     std::unique_ptr<VideoManager> video_manager;
@@ -95,11 +95,22 @@ private:
     std::queue<std::map<std::string, std::string>> video_queue;
     std::mutex video_queue_mutex;
     std::mutex send_mutex;
+    // Serialise la production (chaînage AAD/last_block_hash) ET la mise en file
+    // des messages sécurisés afin que l'ordre fil == ordre de chaînage, et pour
+    // éliminer la course de données sur l'état de session du drone.
+    std::mutex secure_send_mutex;
     std::mutex send_queue_mutex;
     std::condition_variable send_queue_cv;
     std::deque<std::pair<std::vector<uint8_t>, std::string>> send_queue;
     std::atomic<bool> send_running{false};
     size_t send_queue_max{30};
+    std::chrono::steady_clock::time_point last_video_enqueue_tp_{};
+    std::chrono::steady_clock::time_point last_video_drop_log_tp_{};
+    std::chrono::steady_clock::time_point last_send_fail_log_tp_{};
+    std::chrono::steady_clock::time_point last_control_pressure_log_tp_{};
+    uint64_t dropped_video_frames_{0};
+    uint64_t preserved_control_messages_{0};
+    std::atomic<bool> transport_failed_{false};
     
     // Synchronisation YOLO-MiDaS
     std::queue<std::unique_ptr<FrameSyncData>> frame_sync_queue;
@@ -147,7 +158,14 @@ private:
     void send_video_from_queue();
     void send_loop();
     bool enqueue_message(std::vector<uint8_t>&& data, const std::string& type);
+    // Construit ET met en file un message sécurisé de manière atomique (sous
+    // secure_send_mutex) pour préserver la cohérence du chaînage AAD lorsque
+    // plusieurs threads (ping, télémétrie, données de vol) émettent en parallèle.
+    bool enqueue_secure_message(const std::string& msg_type, const std::string& json_data);
     void telemetry_loop();
+    void mark_transport_failure(const std::string& reason);
+    bool should_log_backpressure(std::chrono::steady_clock::time_point& last_log,
+                                 std::chrono::milliseconds interval);
     
 public:
     DroneNetworkClient(const std::string& drone_id = "DRONE_001");
@@ -161,7 +179,7 @@ public:
     bool init_video_pipeline();
     void stop_video();
     void print_stats();
-    void main();
+    int main();
     
     // Getters
     HesiaDrone* get_drone() const { return drone.get(); }

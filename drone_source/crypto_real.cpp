@@ -1,8 +1,15 @@
 #include "crypto_real.hpp"
+#include "security_utils.hpp"
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <stdexcept>
 #include <cstring>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 #if defined(HAVE_LIBOQS) && !defined(HESIA_FIPS_BUILD)
 #include <oqs/oqs.h>
@@ -11,6 +18,80 @@
 // Note: Pour Dilithium et Kyber, on utilise liboqs
 
 namespace hesia {
+
+namespace {
+
+#ifndef _WIN32
+struct PageAlignedRegion {
+    void* base = nullptr;
+    size_t len = 0;
+};
+
+static PageAlignedRegion page_align_region(void* ptr, size_t len) {
+    PageAlignedRegion region;
+    if (!ptr || len == 0) {
+        return region;
+    }
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        return region;
+    }
+    const uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
+    const uintptr_t mask = static_cast<uintptr_t>(page_size - 1);
+    const uintptr_t base = start & ~mask;
+    const uintptr_t end = (start + len + mask) & ~mask;
+    region.base = reinterpret_cast<void*>(base);
+    region.len = static_cast<size_t>(end - base);
+    return region;
+}
+#endif
+
+class ScopedSecretMemoryLock {
+public:
+    ScopedSecretMemoryLock(const uint8_t* ptr, size_t len)
+        : ptr_(const_cast<uint8_t*>(ptr)), len_(len) {
+        if (!ptr_ || len_ == 0) {
+            return;
+        }
+#ifdef _WIN32
+        locked_ = (VirtualLock(ptr_, len_) != 0);
+#else
+        locked_ = (mlock(ptr_, len_) == 0);
+#ifdef MADV_DONTDUMP
+        dontdump_region_ = page_align_region(ptr_, len_);
+        if (dontdump_region_.base && dontdump_region_.len != 0) {
+            (void)madvise(dontdump_region_.base, dontdump_region_.len, MADV_DONTDUMP);
+        }
+#endif
+#endif
+    }
+
+    ~ScopedSecretMemoryLock() {
+        if (!locked_ || !ptr_ || len_ == 0) {
+            return;
+        }
+#ifdef _WIN32
+        VirtualUnlock(ptr_, len_);
+#else
+#ifdef MADV_DODUMP
+        if (dontdump_region_.base && dontdump_region_.len != 0) {
+            (void)madvise(dontdump_region_.base, dontdump_region_.len, MADV_DODUMP);
+        }
+#endif
+        munlock(ptr_, len_);
+#endif
+    }
+
+private:
+    uint8_t* ptr_ = nullptr;
+    size_t len_ = 0;
+    bool locked_ = false;
+#ifndef _WIN32
+    PageAlignedRegion dontdump_region_{};
+#endif
+};
+
+} // namespace
 
 std::vector<uint8_t> hash_data(const std::vector<uint8_t>& data) {
     std::vector<uint8_t> hash(SHA512_DIGEST_LENGTH);
@@ -64,6 +145,7 @@ std::pair<std::vector<uint8_t>, std::vector<uint8_t>> Dilithium::generate_keypai
     
     std::vector<uint8_t> public_key(public_key_len);
     std::vector<uint8_t> secret_key(secret_key_len);
+    (void)SecureMemory::protect(secret_key);
     
     if (OQS_SIG_keypair(sig, public_key.data(), secret_key.data()) != OQS_SUCCESS) {
         OQS_SIG_free(sig);
@@ -79,6 +161,11 @@ std::pair<std::vector<uint8_t>, std::vector<uint8_t>> Dilithium::generate_keypai
 
 std::vector<uint8_t> Dilithium::sign(const std::vector<uint8_t>& sk, const std::vector<uint8_t>& data) {
 #ifdef HAVE_LIBOQS
+#ifndef HESIA_ALLOW_SOFT_SIGN
+    (void)sk;
+    (void)data;
+    throw std::runtime_error("Dilithium::sign disabled in REE build; provision OP-TEE ML-DSA signing or compile with -DHESIA_ALLOW_SOFT_SIGN=ON for non-production recovery only");
+#else
     // ✅ SÉCURITÉ: Validation des entrées
     if (sk.empty()) {
         throw std::invalid_argument("Clé secrète Dilithium vide");
@@ -109,6 +196,7 @@ std::vector<uint8_t> Dilithium::sign(const std::vector<uint8_t>& sk, const std::
     
     std::vector<uint8_t> signature(signature_len);
     size_t signature_len_out;
+    ScopedSecretMemoryLock secret_lock(sk.data(), sk.size());
     
     if (OQS_SIG_sign(sig, signature.data(), &signature_len_out, data.data(), data.size(), sk.data()) != OQS_SUCCESS) {
         OQS_SIG_free(sig);
@@ -118,6 +206,7 @@ std::vector<uint8_t> Dilithium::sign(const std::vector<uint8_t>& sk, const std::
     OQS_SIG_free(sig);
     signature.resize(signature_len_out);
     return signature;
+#endif
 #else
     throw std::runtime_error("Dilithium::sign requires liboqs - compile with -DHAVE_LIBOQS");
 #endif
@@ -172,6 +261,7 @@ std::pair<std::vector<uint8_t>, std::vector<uint8_t>> Kyber::generate_keypair() 
     
     std::vector<uint8_t> public_key(public_key_len);
     std::vector<uint8_t> secret_key(secret_key_len);
+    (void)SecureMemory::protect(secret_key);
     
     if (OQS_KEM_keypair(kem, public_key.data(), secret_key.data()) != OQS_SUCCESS) {
         OQS_KEM_free(kem);
@@ -202,6 +292,7 @@ std::pair<std::vector<uint8_t>, std::vector<uint8_t>> Kyber::encaps(const std::v
     
     std::vector<uint8_t> ciphertext(ciphertext_len);
     std::vector<uint8_t> shared_secret(shared_secret_len);
+    (void)SecureMemory::protect(shared_secret);
     
     if (OQS_KEM_encaps(kem, ciphertext.data(), shared_secret.data(), pk.data()) != OQS_SUCCESS) {
         OQS_KEM_free(kem);
@@ -239,6 +330,7 @@ std::vector<uint8_t> Kyber::decaps(const std::vector<uint8_t>& sk, const std::ve
     
     size_t shared_secret_len = kem->length_shared_secret;
     std::vector<uint8_t> shared_secret(shared_secret_len);
+    (void)SecureMemory::protect(shared_secret);
     
     if (OQS_KEM_decaps(kem, shared_secret.data(), ct.data(), sk.data()) != OQS_SUCCESS) {
         OQS_KEM_free(kem);

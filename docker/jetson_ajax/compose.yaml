@@ -1,0 +1,58 @@
+services:
+  pixhawk-sitl:
+    build:
+      context: .
+      dockerfile: Dockerfile.pixhawk-sitl
+    image: hesia/pixhawk-arducopter-sitl:local
+    container_name: hesia-pixhawk-sitl
+    environment:
+      ARDUPILOT_DIR: /workspace/pixhawk/firmware/ardupilot
+      ARDUPILOT_HOME: "48.8566,2.3522,120,0"
+      SITL_MODEL: quad
+      SITL_SPEEDUP: "1"
+      SITL_BASE_PORT: "5760"
+    volumes:
+      - type: bind
+        source: ${JETSON_WORKSPACE_HOST}
+        target: /workspace
+    ports:
+      - "5760:5760"
+    working_dir: /workspace/pixhawk/firmware/ardupilot
+    command: ["/usr/local/bin/pixhawk-sitl"]
+
+  jetson-sim:
+    build:
+      context: .
+      dockerfile: Dockerfile.jetson-sim
+    image: hesia/jetson-ajax-sim:local
+    container_name: hesia-jetson-ajax-sim
+    environment:
+      HESIA_SIM_MODE: "1"
+      JETSON_ROOTFS: /jetson_rootfs
+      HESIA_REPO: /hesia
+      JETSON_WORKSPACE: /workspace
+      HESIA_CPUINFO_PATH: /sim_hw/proc/cpuinfo
+      HESIA_UPTIME_PATH: /sim_hw/proc/uptime
+      HESIA_CLOCK_SOURCE_PATH: /sim_hw/sys/devices/system/clocksource/clocksource0/current_clocksource
+      PIXHAWK_MAVLINK_ENDPOINT: tcp:pixhawk-sitl:5760
+      PIXHAWK_PYMAVLINK_ROOT: /workspace/pixhawk/firmware/ardupilot/modules/mavlink
+    depends_on:
+      - pixhawk-sitl
+    volumes:
+      - type: bind
+        source: ${JETSON_ROOTFS_HOST}
+        target: /jetson_rootfs
+        read_only: true
+      - type: bind
+        source: ${HESIA_REPO_HOST}
+        target: /hesia
+        read_only: true
+      - type: bind
+        source: ${JETSON_WORKSPACE_HOST}
+        target: /workspace
+      - type: bind
+        source: ${JETSON_SYS_MIRROR_HOST}
+        target: /sim_hw
+        read_only: true
+    working_dir: /work
+    command: ["/usr/local/bin/jetson-sim-smoke"]

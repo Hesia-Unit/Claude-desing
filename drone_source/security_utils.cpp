@@ -11,6 +11,7 @@
 #include "stack_protection.hpp"
 #include "cfi_protection.hpp"
 #include "sandbox.hpp"
+#include "optee_client.hpp"
 
 #include <iostream>
 #include <chrono>
@@ -19,8 +20,14 @@
 #include <string>
 #include <cstdlib>
 #include <openssl/crypto.h>
+#include <openssl/core_names.h>
 #include <openssl/rand.h>
 #include <openssl/evp.h>
+#include <openssl/params.h>
+#include <openssl/ec.h>
+#include <openssl/ecdsa.h>
+#include <openssl/kdf.h>
+#include <openssl/obj_mac.h>
 #include <openssl/sha.h>
 #include <openssl/err.h>
 #include <openssl/hmac.h>
@@ -77,6 +84,81 @@ std::vector<std::pair<const void*, std::vector<uint8_t>>> RuntimeProtection::fun
 std::mutex RuntimeProtection::function_hashes_mutex;
 std::atomic<bool> RuntimeProtection::protection_enabled{false};
 
+namespace {
+
+std::once_flag g_runtime_cleanup_once;
+
+uint64_t secure_seed64_or_throw(const char* purpose) {
+    uint64_t seed = 0;
+    if (!SecureRNG::generate_bytes(reinterpret_cast<uint8_t*>(&seed), sizeof(seed))) {
+        throw std::runtime_error(std::string("SecureRNG::generate_bytes failed for ") + purpose);
+    }
+    return seed;
+}
+
+template <typename IntT>
+IntT secure_uniform_or_throw(IntT min_inclusive, IntT max_inclusive, const char* purpose) {
+    std::mt19937_64 gen(secure_seed64_or_throw(purpose));
+    std::uniform_int_distribution<IntT> dist(min_inclusive, max_inclusive);
+    return dist(gen);
+}
+
+void runtime_protection_cleanup() {
+    try {
+        ClockAttackProtection::cleanup();
+    } catch (...) {
+    }
+    try {
+        FaultInjectionProtection::cleanup();
+    } catch (...) {
+    }
+    try {
+        VoltageGlitchProtection::cleanup();
+    } catch (...) {
+    }
+    try {
+        EMAttackProtection::cleanup();
+    } catch (...) {
+    }
+    try {
+        HardwareSecurityIntegration::stop_hardware_monitoring();
+    } catch (...) {
+    }
+}
+
+void register_runtime_cleanup_once() {
+    std::call_once(g_runtime_cleanup_once, []() {
+        std::atexit(runtime_protection_cleanup);
+    });
+}
+
+#ifndef _WIN32
+struct PageAlignedRegion {
+    void* base = nullptr;
+    size_t len = 0;
+};
+
+static PageAlignedRegion page_align_region(void* ptr, size_t len) {
+    PageAlignedRegion region;
+    if (!ptr || len == 0) {
+        return region;
+    }
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        return region;
+    }
+    const uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
+    const uintptr_t page_mask = static_cast<uintptr_t>(page_size - 1);
+    const uintptr_t base = start & ~page_mask;
+    const uintptr_t end = (start + len + page_mask) & ~page_mask;
+    region.base = reinterpret_cast<void*>(base);
+    region.len = static_cast<size_t>(end - base);
+    return region;
+}
+#endif
+
+} // namespace
+
 // ===== FONCTIONS UTILITAIRES =====
 static bool is_asan_build() {
 #if defined(__has_feature)
@@ -113,6 +195,266 @@ uint8_t safe_compare(const uint8_t* a, const uint8_t* b, size_t len) {
         diff |= a[i] ^ b[i];
     }
     return diff;
+}
+
+static std::vector<uint8_t> sha256_bytes_local(const std::vector<uint8_t>& data) {
+    std::vector<uint8_t> out(SHA256_DIGEST_LENGTH);
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) {
+        throw std::runtime_error("EVP_MD_CTX_new failed");
+    }
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1 ||
+        EVP_DigestUpdate(ctx, data.data(), data.size()) != 1) {
+        EVP_MD_CTX_free(ctx);
+        throw std::runtime_error("EVP sha256 init/update failed");
+    }
+    unsigned int out_len = 0;
+    if (EVP_DigestFinal_ex(ctx, out.data(), &out_len) != 1 || out_len != SHA256_DIGEST_LENGTH) {
+        EVP_MD_CTX_free(ctx);
+        throw std::runtime_error("EVP sha256 final failed");
+    }
+    EVP_MD_CTX_free(ctx);
+    return out;
+}
+
+static void append_u64_be(std::vector<uint8_t>& out, uint64_t value) {
+    for (int i = 7; i >= 0; --i) {
+        out.push_back(static_cast<uint8_t>((value >> (i * 8)) & 0xFF));
+    }
+}
+
+static uint64_t read_u64_be_local(const uint8_t* in) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) {
+        v = (v << 8) | in[i];
+    }
+    return v;
+}
+
+static std::vector<uint8_t> read_binary_file_if_exists(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) {
+        return {};
+    }
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)),
+                                 std::istreambuf_iterator<char>());
+}
+
+static std::vector<uint8_t> ecdsa_rs_to_der(const std::vector<uint8_t>& signature) {
+    if (signature.size() != 64) {
+        throw std::runtime_error("Invalid raw ECDSA signature size");
+    }
+
+    ECDSA_SIG* sig = ECDSA_SIG_new();
+    if (!sig) {
+        throw std::runtime_error("ECDSA_SIG_new failed");
+    }
+
+    BIGNUM* r = BN_bin2bn(signature.data(), 32, nullptr);
+    BIGNUM* s = BN_bin2bn(signature.data() + 32, 32, nullptr);
+    if (!r || !s || ECDSA_SIG_set0(sig, r, s) != 1) {
+        if (r) BN_free(r);
+        if (s) BN_free(s);
+        ECDSA_SIG_free(sig);
+        throw std::runtime_error("ECDSA_SIG_set0 failed");
+    }
+
+    const int der_len = i2d_ECDSA_SIG(sig, nullptr);
+    if (der_len <= 0) {
+        ECDSA_SIG_free(sig);
+        throw std::runtime_error("i2d_ECDSA_SIG size failed");
+    }
+
+    std::vector<uint8_t> der(static_cast<size_t>(der_len));
+    unsigned char* der_ptr = der.data();
+    if (i2d_ECDSA_SIG(sig, &der_ptr) != der_len) {
+        ECDSA_SIG_free(sig);
+        throw std::runtime_error("i2d_ECDSA_SIG failed");
+    }
+
+    ECDSA_SIG_free(sig);
+    return der;
+}
+
+static EVP_PKEY* load_p256_pubkey_from_uncompressed(const std::vector<uint8_t>& pubkey) {
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
+    if (!ctx) {
+        throw std::runtime_error("EVP_PKEY_CTX_new_from_name failed");
+    }
+    if (EVP_PKEY_fromdata_init(ctx) <= 0) {
+        EVP_PKEY_CTX_free(ctx);
+        throw std::runtime_error("EVP_PKEY_fromdata_init failed");
+    }
+
+    OSSL_PARAM params[3];
+    params[0] = OSSL_PARAM_construct_utf8_string(
+        OSSL_PKEY_PARAM_GROUP_NAME,
+        const_cast<char*>("prime256v1"),
+        0);
+    params[1] = OSSL_PARAM_construct_octet_string(
+        OSSL_PKEY_PARAM_PUB_KEY,
+        const_cast<unsigned char*>(pubkey.data()),
+        pubkey.size());
+    params[2] = OSSL_PARAM_construct_end();
+
+    EVP_PKEY* pkey = nullptr;
+    if (EVP_PKEY_fromdata(ctx, &pkey, EVP_PKEY_PUBLIC_KEY, params) <= 0) {
+        EVP_PKEY_CTX_free(ctx);
+        throw std::runtime_error("EVP_PKEY_fromdata failed");
+    }
+    EVP_PKEY_CTX_free(ctx);
+    return pkey;
+}
+
+static std::vector<uint8_t> hmac_sha3_512_bytes(const std::vector<uint8_t>& key,
+                                                const uint8_t* data,
+                                                size_t data_len) {
+    EVP_MAC* mac = EVP_MAC_fetch(nullptr, "HMAC", nullptr);
+    if (!mac) {
+        throw std::runtime_error("EVP_MAC_fetch(HMAC) failed");
+    }
+
+    EVP_MAC_CTX* ctx = EVP_MAC_CTX_new(mac);
+    EVP_MAC_free(mac);
+    if (!ctx) {
+        throw std::runtime_error("EVP_MAC_CTX_new failed");
+    }
+
+    OSSL_PARAM params[2];
+    params[0] = OSSL_PARAM_construct_utf8_string(
+        OSSL_MAC_PARAM_DIGEST,
+        const_cast<char*>("SHA3-512"),
+        0);
+    params[1] = OSSL_PARAM_construct_end();
+
+    if (EVP_MAC_init(ctx, key.data(), key.size(), params) != 1 ||
+        (data_len > 0 && EVP_MAC_update(ctx, data, data_len) != 1)) {
+        EVP_MAC_CTX_free(ctx);
+        throw std::runtime_error("EVP_MAC init/update failed");
+    }
+
+    std::vector<uint8_t> out(64);
+    size_t out_len = 0;
+    if (EVP_MAC_final(ctx, out.data(), &out_len, out.size()) != 1 || out_len != out.size()) {
+        EVP_MAC_CTX_free(ctx);
+        throw std::runtime_error("EVP_MAC final failed");
+    }
+
+    EVP_MAC_CTX_free(ctx);
+    return out;
+}
+
+static bool verify_p256_attestation_signature_local(const std::vector<uint8_t>& pubkey,
+                                                    const std::vector<uint8_t>& digest,
+                                                    const std::vector<uint8_t>& signature) {
+    if (pubkey.size() != 65 || pubkey[0] != 0x04 || signature.size() != 64 || digest.empty()) {
+        return false;
+    }
+
+    try {
+        EVP_PKEY* pkey = load_p256_pubkey_from_uncompressed(pubkey);
+        EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(pkey, nullptr);
+        if (!ctx) {
+            EVP_PKEY_free(pkey);
+            return false;
+        }
+
+        bool ok = false;
+        if (EVP_PKEY_verify_init(ctx) == 1 &&
+            EVP_PKEY_CTX_set_signature_md(ctx, EVP_sha256()) == 1) {
+            const std::vector<uint8_t> der_sig = ecdsa_rs_to_der(signature);
+            ok = (EVP_PKEY_verify(ctx,
+                                  der_sig.data(),
+                                  der_sig.size(),
+                                  digest.data(),
+                                  digest.size()) == 1);
+        }
+
+        EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(pkey);
+        return ok;
+    } catch (...) {
+        return false;
+    }
+}
+
+static std::vector<uint8_t> build_runtime_attestation_body(uint8_t flags,
+                                                           uint64_t memory_stats,
+                                                           const std::vector<uint8_t>& summary_digest) {
+    std::vector<uint8_t> body;
+    body.reserve(4 + 1 + 1 + 8 + 8 + 64 + 16);
+    body.push_back('H');
+    body.push_back('R');
+    body.push_back('A');
+    body.push_back('2');
+    body.push_back(0x01);
+    body.push_back(flags);
+
+    const uint64_t timestamp = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count());
+    append_u64_be(body, timestamp);
+    append_u64_be(body, memory_stats);
+    body.insert(body.end(), summary_digest.begin(), summary_digest.end());
+
+    std::vector<uint8_t> nonce(16, 0);
+    if (RAND_bytes(nonce.data(), static_cast<int>(nonce.size())) != 1) {
+        throw std::runtime_error("RAND_bytes failed for runtime attestation nonce");
+    }
+    body.insert(body.end(), nonce.begin(), nonce.end());
+    return body;
+}
+
+static constexpr size_t kRuntimeAttestationBodyLen = 102;
+static constexpr size_t kRuntimeAttestationPubkeyLen = 65;
+static constexpr size_t kRuntimeAttestationSignatureLen = 64;
+
+static std::mutex g_honeypot_mutex;
+static std::vector<uint8_t> g_honeypot_data;
+static std::vector<uint8_t> g_honeypot_expected_digest;
+
+static uint64_t current_unix_time_seconds() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count());
+}
+
+static uint64_t runtime_attestation_max_age_seconds() {
+    constexpr uint64_t kDefaultMaxAgeSec = 300;
+    const char* env = std::getenv("HESIA_RUNTIME_ATTEST_MAX_AGE_SEC");
+    if (!env || env[0] == '\0') {
+        return kDefaultMaxAgeSec;
+    }
+
+    char* end = nullptr;
+    unsigned long parsed = std::strtoul(env, &end, 10);
+    if (!end || *end != '\0' || parsed == 0UL) {
+        return kDefaultMaxAgeSec;
+    }
+    return static_cast<uint64_t>(parsed);
+}
+
+static std::vector<uint8_t> load_pinned_runtime_attestation_pubkey() {
+    const char* env = std::getenv("HESIA_TEE_ATTEST_PUBKEY");
+    if (env && env[0] != '\0') {
+        return read_binary_file_if_exists(env);
+    }
+
+    const std::vector<std::string> candidates = {
+        "/etc/hesia/secure/tee_attest_p256_pub.bin",
+        (std::filesystem::path(Config::BASE_DIR) / "secure" / "tee_attest_p256_pub.bin").string()
+    };
+
+    for (const std::string& path : candidates) {
+        std::vector<uint8_t> pubkey = read_binary_file_if_exists(path);
+        if (!pubkey.empty()) {
+            return pubkey;
+        }
+    }
+
+    return {};
 }
 
 void* secure_alloc(size_t size) {
@@ -185,9 +527,47 @@ void SecureMemory::zeroize(void* ptr, size_t len) {
     _mm_sfence();
 }
 
+bool SecureMemory::protect(void* ptr, size_t len) {
+    if (!ptr || len == 0) return true;
+#ifdef _WIN32
+    return VirtualLock(ptr, len) != 0;
+#else
+    const bool locked = (mlock(ptr, len) == 0);
+#ifdef MADV_DONTDUMP
+    const PageAlignedRegion region = page_align_region(ptr, len);
+    if (region.base && region.len != 0) {
+        (void)madvise(region.base, region.len, MADV_DONTDUMP);
+    }
+#endif
+    return locked;
+#endif
+}
+
+void SecureMemory::unprotect(void* ptr, size_t len) {
+    if (!ptr || len == 0) return;
+#ifdef _WIN32
+    (void)VirtualUnlock(ptr, len);
+#else
+#ifdef MADV_DODUMP
+    const PageAlignedRegion region = page_align_region(ptr, len);
+    if (region.base && region.len != 0) {
+        (void)madvise(region.base, region.len, MADV_DODUMP);
+    }
+#endif
+    (void)munlock(ptr, len);
+#endif
+}
+
 void SecureMemory::wipe(std::vector<uint8_t>& data) {
     if (!data.empty()) {
         zeroize(data.data(), data.size());
+    }
+}
+
+void SecureMemory::zeroize(std::string& data) {
+    if (!data.empty()) {
+        zeroize(data.data(), data.size());
+        data.clear();
     }
 }
 
@@ -195,6 +575,26 @@ void SecureMemory::zeroize(std::vector<uint8_t>& data) {
     if (!data.empty()) {
         wipe(data);
         data.clear();
+    }
+}
+
+bool SecureMemory::protect(std::vector<uint8_t>& data) {
+    return data.empty() ? true : protect(data.data(), data.size());
+}
+
+bool SecureMemory::protect(std::string& data) {
+    return data.empty() ? true : protect(data.data(), data.size());
+}
+
+void SecureMemory::unprotect(std::vector<uint8_t>& data) {
+    if (!data.empty()) {
+        unprotect(data.data(), data.size());
+    }
+}
+
+void SecureMemory::unprotect(std::string& data) {
+    if (!data.empty()) {
+        unprotect(data.data(), data.size());
     }
 }
 
@@ -272,49 +672,87 @@ uint8_t ConstantTime::select(uint8_t mask, uint8_t a, uint8_t b) {
 // ===== HKDF =====
 
 std::vector<uint8_t> HKDF::extract(const std::vector<uint8_t>& salt, const std::vector<uint8_t>& ikm) {
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr);
+    if (!ctx) {
+        throw std::runtime_error("EVP_PKEY_CTX_new_id(HKDF) failed");
+    }
+
+    auto fail = [&](const char* msg) {
+        EVP_PKEY_CTX_free(ctx);
+        throw std::runtime_error(msg);
+    };
+
+    if (EVP_PKEY_derive_init(ctx) <= 0) fail("EVP_PKEY_derive_init failed");
+    if (EVP_PKEY_CTX_set_hkdf_mode(ctx, EVP_PKEY_HKDEF_MODE_EXTRACT_ONLY) <= 0) {
+        fail("EVP_PKEY_CTX_set_hkdf_mode(EXTRACT_ONLY) failed");
+    }
+    if (EVP_PKEY_CTX_set_hkdf_md(ctx, EVP_sha3_512()) <= 0) fail("EVP_PKEY_CTX_set_hkdf_md failed");
+    static const uint8_t kZeroByte = 0;
+    const uint8_t* salt_ptr = salt.empty() ? &kZeroByte : salt.data();
+    const uint8_t* ikm_ptr = ikm.empty() ? &kZeroByte : ikm.data();
+    if (EVP_PKEY_CTX_set1_hkdf_salt(ctx, salt_ptr, static_cast<int>(salt.size())) <= 0) {
+        fail("EVP_PKEY_CTX_set1_hkdf_salt failed");
+    }
+    if (EVP_PKEY_CTX_set1_hkdf_key(ctx, ikm_ptr, static_cast<int>(ikm.size())) <= 0) {
+        fail("EVP_PKEY_CTX_set1_hkdf_key failed");
+    }
+
     std::vector<uint8_t> prk(HASH_SIZE);
-    
-    // ✅ SÉCURITÉ: Utilisation de SHA3-512 au lieu de SHA512
-    HMAC(EVP_sha3_512(), 
-         salt.data(), static_cast<int>(salt.size()),
-         ikm.data(), static_cast<int>(ikm.size()),
-         prk.data(), nullptr);
+    size_t out_len = prk.size();
+    if (EVP_PKEY_derive(ctx, prk.data(), &out_len) <= 0 || out_len != prk.size()) {
+        fail("EVP_PKEY_derive extract failed");
+    }
+
+    EVP_PKEY_CTX_free(ctx);
     return prk;
 }
 
 std::vector<uint8_t> HKDF::expand(const std::vector<uint8_t>& prk, const std::vector<uint8_t>& info, size_t len) {
-    std::vector<uint8_t> okm;
-    size_t iterations = (len + HASH_SIZE - 1) / HASH_SIZE;
-    
-    for (size_t i = 1; i <= iterations; i++) {
-        HMAC_CTX* ctx = HMAC_CTX_new();
-        // ✅ SÉCURITÉ: Utilisation de SHA3-512 au lieu de SHA512
-        HMAC_Init_ex(ctx, prk.data(), static_cast<int>(prk.size()), EVP_sha3_512(), nullptr);
-        
-        if (i > 1) {
-            HMAC_Update(ctx, okm.data() + (i-2)*HASH_SIZE, HASH_SIZE);
-        }
-        
-        HMAC_Update(ctx, info.data(), info.size());
-        uint8_t counter = static_cast<uint8_t>(i);
-        HMAC_Update(ctx, &counter, 1);
-        
-        unsigned char buffer[HASH_SIZE];
-        unsigned int buffer_len;
-        HMAC_Final(ctx, buffer, &buffer_len);
-        HMAC_CTX_free(ctx);
-        
-        okm.insert(okm.end(), buffer, buffer + buffer_len);
+    if (len == 0) {
+        return {};
     }
-    
-    okm.resize(len);
+
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr);
+    if (!ctx) {
+        throw std::runtime_error("EVP_PKEY_CTX_new_id(HKDF) failed");
+    }
+
+    auto fail = [&](const char* msg) {
+        EVP_PKEY_CTX_free(ctx);
+        throw std::runtime_error(msg);
+    };
+
+    if (EVP_PKEY_derive_init(ctx) <= 0) fail("EVP_PKEY_derive_init failed");
+    if (EVP_PKEY_CTX_set_hkdf_mode(ctx, EVP_PKEY_HKDEF_MODE_EXPAND_ONLY) <= 0) {
+        fail("EVP_PKEY_CTX_set_hkdf_mode(EXPAND_ONLY) failed");
+    }
+    if (EVP_PKEY_CTX_set_hkdf_md(ctx, EVP_sha3_512()) <= 0) fail("EVP_PKEY_CTX_set_hkdf_md failed");
+    static const uint8_t kZeroByte = 0;
+    const uint8_t* prk_ptr = prk.empty() ? &kZeroByte : prk.data();
+    if (EVP_PKEY_CTX_set1_hkdf_key(ctx, prk_ptr, static_cast<int>(prk.size())) <= 0) {
+        fail("EVP_PKEY_CTX_set1_hkdf_key failed");
+    }
+    if (!info.empty() &&
+        EVP_PKEY_CTX_add1_hkdf_info(ctx, info.data(), static_cast<int>(info.size())) <= 0) {
+        fail("EVP_PKEY_CTX_add1_hkdf_info failed");
+    }
+
+    std::vector<uint8_t> okm(len);
+    size_t out_len = okm.size();
+    if (EVP_PKEY_derive(ctx, okm.data(), &out_len) <= 0 || out_len != okm.size()) {
+        fail("EVP_PKEY_derive expand failed");
+    }
+
+    EVP_PKEY_CTX_free(ctx);
     return okm;
 }
 
 std::vector<uint8_t> HKDF::derive(const std::vector<uint8_t>& salt, const std::vector<uint8_t>& ikm, 
                                  const std::vector<uint8_t>& info, size_t len) {
     std::vector<uint8_t> prk = extract(salt, ikm);
-    return expand(prk, info, len);
+    std::vector<uint8_t> okm = expand(prk, info, len);
+    SecureMemory::zeroize(prk);
+    return okm;
 }
 
 // ===== SECURE RNG =====
@@ -563,7 +1001,64 @@ std::shared_ptr<Logger> RuntimeProtection::setup_logger(
     }
 }
 bool RuntimeProtection::validate_remote_attestation(const std::vector<uint8_t>& report) {
+    // strict runtime attestation validation
     auto logger = setup_logger("RUNTIME-PROTECTION", Config::LOG_DIR);
+
+    const size_t expected_len = kRuntimeAttestationBodyLen +
+                                kRuntimeAttestationPubkeyLen +
+                                kRuntimeAttestationSignatureLen;
+    if (report.empty()) {
+        if (logger) logger->error("Rapport d'attestation vide");
+        return false;
+    }
+    if (report.size() != expected_len) {
+        if (logger) logger->error("Rapport d'attestation invalide: taille " +
+                                  std::to_string(report.size()) + " attendue " +
+                                  std::to_string(expected_len));
+        return false;
+    }
+
+    const std::vector<uint8_t> body(report.begin(), report.begin() + kRuntimeAttestationBodyLen);
+    const std::vector<uint8_t> pubkey(report.begin() + kRuntimeAttestationBodyLen,
+                                      report.begin() + kRuntimeAttestationBodyLen + kRuntimeAttestationPubkeyLen);
+    const std::vector<uint8_t> signature(report.begin() + kRuntimeAttestationBodyLen + kRuntimeAttestationPubkeyLen,
+                                         report.end());
+
+    if (body[0] != 'H' || body[1] != 'R' || body[2] != 'A' || body[3] != '2' || body[4] != 0x01) {
+        if (logger) logger->error("En-tete d'attestation runtime invalide");
+        return false;
+    }
+    if ((body[5] & 0x01u) == 0u) {
+        if (logger) logger->error("Attestation runtime refusee: protection inactive");
+        return false;
+    }
+
+    const uint64_t timestamp = read_u64_be_local(body.data() + 6);
+    const uint64_t now = current_unix_time_seconds();
+    const uint64_t max_age = runtime_attestation_max_age_seconds();
+    if (timestamp == 0 || timestamp > now + 30 || now > timestamp + max_age) {
+        if (logger) logger->error("Attestation runtime expiree ou horodatage incoherent");
+        return false;
+    }
+
+    const std::vector<uint8_t> pinned_pubkey = load_pinned_runtime_attestation_pubkey();
+    if (!pinned_pubkey.empty()) {
+        if (pinned_pubkey.size() != kRuntimeAttestationPubkeyLen) {
+            if (logger) logger->error("Cle publique TEE epinglee invalide");
+            return false;
+        }
+        if (!ConstantTime::equals(pinned_pubkey, pubkey)) {
+            if (logger) logger->error("Cle publique TEE du rapport non reconnue");
+            return false;
+        }
+    }
+
+    const bool attestation_ok = verify_p256_attestation_signature_local(pubkey,
+                                                                        sha256_bytes_local(body),
+                                                                        signature);
+    if (logger) logger->info("Validation attestation runtime: " +
+                             std::string(attestation_ok ? "VALIDE" : "INVALIDE"));
+    return attestation_ok;
     
     if (!protection_enabled.load()) {
         if (logger) logger->warning("Runtime protection non activée");
@@ -657,6 +1152,8 @@ void RuntimeProtection::setup_protection() {
             emergency_shutdown();
         };
 
+        register_runtime_cleanup_once();
+
         // Activer toutes les protections contre les attaques par cache timing
         CacheProtection::flush_cache_lines();
         CacheProtection::isolate_cache_access();
@@ -669,8 +1166,12 @@ void RuntimeProtection::setup_protection() {
         PowerMasking::apply_algorithmic_blinding();
         
         protection_enabled.store(true);
-        SystemSecurity::initialize();
-        SystemSecurity::enable_maximum_security();
+        if (!SystemSecurity::initialize()) {
+            fail_closed("Echec initialisation securite systeme (fail-closed)");
+        }
+        if (!SystemSecurity::enable_maximum_security()) {
+            fail_closed("Echec activation mode securite maximum (fail-closed)");
+        }
 
         if (!HardwareSecurityIntegration::initialize() ||
             !HardwareSecurityIntegration::start_hardware_monitoring()) {
@@ -942,62 +1443,112 @@ void RuntimeProtection::detect_memory_dumping() {
 }
 
 std::vector<uint8_t> RuntimeProtection::generate_attestation_report() {
-    std::vector<uint8_t> report(1024);
-    size_t offset = 0;
-    
-    auto now = std::chrono::high_resolution_clock::now();
-    uint64_t timestamp = now.time_since_epoch().count();
-    for (int i = 0; i < 8; i++) {
-        report[offset++] = (timestamp >> (i * 8)) & 0xFF;
+    auto logger = setup_logger("RUNTIME-PROTECTION", Config::LOG_DIR);
+    if (!protection_enabled.load()) {
+        if (logger) logger->warning("Attestation runtime refusee: protection non active");
+        return {};
     }
-    
-    report[offset++] = 0x01;
-    report[offset++] = is_aesni_supported() ? 0x01 : 0x00;
-    
-    uint16_t func_count = std::min((uint16_t)function_hashes.size(), (uint16_t)10);
-    report[offset++] = (func_count >> 8) & 0xFF;
-    report[offset++] = func_count & 0xFF;
-    
-    for (size_t i = 0; i < func_count; i++) {
-        const auto& hash = function_hashes[i].second;
-        for (size_t j = 0; j < hash.size() && j < SHA512_DIGEST_LENGTH; j++) {
-            report[offset++] = hash[j];
-        }
-        for (size_t j = hash.size(); j < SHA512_DIGEST_LENGTH; j++) {
-            report[offset++] = 0x00;
+
+    std::vector<uint8_t> summary_input;
+    {
+        std::lock_guard<std::mutex> lock(function_hashes_mutex);
+        summary_input.reserve(function_hashes.size() * (8 + SHA512_DIGEST_LENGTH));
+        for (const auto& func_hash : function_hashes) {
+            append_u64_be(summary_input,
+                          static_cast<uint64_t>(reinterpret_cast<uintptr_t>(func_hash.first)));
+            summary_input.insert(summary_input.end(),
+                                 func_hash.second.begin(),
+                                 func_hash.second.end());
         }
     }
-    
+    if (summary_input.empty()) {
+        const char kEmptyMarker[] = "EMPTY_RUNTIME_MAP";
+        summary_input.assign(kEmptyMarker, kEmptyMarker + sizeof(kEmptyMarker) - 1);
+    }
+
+    const std::vector<uint8_t> summary_digest = hash_data(summary_input);
+    if (summary_digest.size() != SHA512_DIGEST_LENGTH) {
+        if (logger) logger->error("Digest d'attestation runtime invalide");
+        return {};
+    }
+
+    uint8_t flags = 0x01;
+    if (is_aesni_supported()) {
+        flags |= 0x02;
+    }
+
     uint64_t memory_stats = 0;
 #ifdef _WIN32
     PROCESS_MEMORY_COUNTERS pmc;
     if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
         memory_stats = pmc.WorkingSetSize;
     }
+#else
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        memory_stats = static_cast<uint64_t>(usage.ru_maxrss) * 1024ULL;
+    }
 #endif
-    for (int i = 0; i < 8; i++) {
-        report[offset++] = (memory_stats >> (i * 8)) & 0xFF;
+
+    const std::vector<uint8_t> body = build_runtime_attestation_body(flags, memory_stats, summary_digest);
+    if (body.size() != kRuntimeAttestationBodyLen) {
+        if (logger) logger->error("Corps d'attestation runtime invalide");
+        return {};
     }
-    
-    std::vector<uint8_t> nonce(16);
-    if (RAND_bytes(nonce.data(), nonce.size()) == 1) {
-        for (size_t i = 0; i < nonce.size(); i++) {
-            report[offset++] = nonce[i];
-        }
-    } else {
-        std::mt19937 gen(std::random_device{}());
-        for (size_t i = 0; i < 16; i++) {
-            report[offset++] = gen() & 0xFF;
-        }
+    if (!optee_available()) {
+        if (logger) logger->warning("Attestation runtime TEE indisponible");
+        return {};
     }
-    
-    std::vector<uint8_t> signature_key(32);
-    if (RAND_bytes(signature_key.data(), signature_key.size()) != 1) {
-        for (size_t i = 0; i < signature_key.size(); i++) {
-            signature_key[i] = 0x42;
-        }
+
+    static std::atomic<bool> runtime_attestation_tee_disabled{false};
+    if (runtime_attestation_tee_disabled.load(std::memory_order_relaxed)) {
+        return {};
     }
-    
+
+    try {
+        std::vector<uint8_t> pubkey;
+        try {
+            pubkey = optee_get_attestation_public_key();
+        } catch (const std::exception& e) {
+            pubkey = load_pinned_runtime_attestation_pubkey();
+            static std::atomic<bool> pinned_pubkey_fallback_logged{false};
+            if (!pubkey.empty() && logger && !pinned_pubkey_fallback_logged.exchange(true)) {
+                logger->warning("Export cle publique attestation TEE indisponible, repli sur cle epinglee: " +
+                                std::string(e.what()));
+            } else if (pubkey.empty()) {
+                throw;
+            }
+        }
+
+        const std::vector<uint8_t> signature = optee_sign_attestation_digest(sha256_bytes_local(body));
+        if (pubkey.size() != kRuntimeAttestationPubkeyLen ||
+            signature.size() != kRuntimeAttestationSignatureLen) {
+            if (logger) logger->error("Sortie d'attestation TEE invalide");
+            return {};
+        }
+
+        std::vector<uint8_t> report;
+        report.reserve(body.size() + pubkey.size() + signature.size());
+        report.insert(report.end(), body.begin(), body.end());
+        report.insert(report.end(), pubkey.begin(), pubkey.end());
+        report.insert(report.end(), signature.begin(), signature.end());
+        return report;
+    } catch (const std::exception& e) {
+        const bool first_disable =
+            !runtime_attestation_tee_disabled.exchange(true, std::memory_order_relaxed);
+        if (logger) {
+            if (first_disable) {
+                logger->warning("Attestation runtime TEE desactivee apres echec permanent: " +
+                                std::string(e.what()));
+            } else {
+                logger->debug("Attestation runtime TEE toujours indisponible: " + std::string(e.what()));
+            }
+        }
+        return {};
+    }
+
+    return {};
+#if 0
     EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
     if (mdctx) {
         EVP_PKEY* pkey = EVP_PKEY_new_mac_key(EVP_PKEY_HMAC, nullptr, 
@@ -1016,6 +1567,7 @@ std::vector<uint8_t> RuntimeProtection::generate_attestation_report() {
     
     report.resize(offset);
     return report;
+#endif
 }
 
 bool RuntimeProtection::is_wsl_environment() {
@@ -1143,8 +1695,14 @@ void RuntimeProtection::monitor_system_anomalies() {
 
 bool RuntimeProtection::self_healing_check() {
     bool all_good = true;
-    
-    for (const auto& func_hash : function_hashes) {
+
+    std::vector<std::pair<const void*, std::vector<uint8_t>>> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(function_hashes_mutex);
+        snapshot = function_hashes;
+    }
+
+    for (const auto& func_hash : snapshot) {
         size_t func_size = 1024;
         if (!verify_function_integrity(func_hash.first, func_size)) {
             std::cerr << "Intégrité de fonction compromise!" << std::endl;
@@ -1200,25 +1758,39 @@ void RuntimeProtection::emergency_shutdown() {
 }
 
 void RuntimeProtection::setup_honeypots() {
-    volatile char* honeypot_data = new char[1024];
+    std::lock_guard<std::mutex> lock(g_honeypot_mutex);
+    g_honeypot_data.assign(1024, 0);
     const char* fake_key = "HESIA_SECRET_KEY_THIS_IS_A_TRAP_";
-    for (size_t i = 0; i < strlen(fake_key) && i < 1024; i++) {
-        honeypot_data[i] = fake_key[i];
+    for (size_t i = 0; i < strlen(fake_key) && i < g_honeypot_data.size(); i++) {
+        g_honeypot_data[i] = static_cast<uint8_t>(fake_key[i]);
     }
-    (void)honeypot_data;
+
+    std::vector<uint8_t> canary(32, 0);
+    if (!SecureRNG::generate_bytes(canary)) {
+        for (size_t i = 0; i < canary.size(); ++i) {
+            canary[i] = static_cast<uint8_t>((0xA5u + i) & 0xFFu);
+        }
+    }
+
+    const size_t canary_offset = 512;
+    std::copy(canary.begin(),
+              canary.end(),
+              g_honeypot_data.begin() + canary_offset);
+    g_honeypot_expected_digest = hash_data(g_honeypot_data);
 }
 
 bool RuntimeProtection::check_honeypot_triggers() {
-    static uint64_t last_check = 0;
-    auto now = std::chrono::high_resolution_clock::now();
-    uint64_t current_time = now.time_since_epoch().count();
-    
-    if (current_time - last_check > 5000000000ULL) {
-        last_check = current_time;
+    std::lock_guard<std::mutex> lock(g_honeypot_mutex);
+    if (g_honeypot_data.empty() || g_honeypot_expected_digest.empty()) {
         return false;
     }
-    
-    return true;
+
+    const std::vector<uint8_t> current_digest = hash_data(g_honeypot_data);
+    if (current_digest.size() != g_honeypot_expected_digest.size()) {
+        return false;
+    }
+
+    return ConstantTime::equals(current_digest, g_honeypot_expected_digest);
 }
 
 bool RuntimeProtection::attempt_function_repair(const void* func_ptr) {
@@ -1399,7 +1971,9 @@ bool RuntimeProtection::detect_fault_injection() {
 }
 
 void RuntimeProtection::monitor_system_integrity() {
-    static std::thread integrity_thread([]() {
+    static std::once_flag integrity_monitor_once;
+    std::call_once(integrity_monitor_once, []() {
+        std::thread([]() {
         static int integrity_check_counter = 0;
         while (true) {
             if (detect_fault_injection()) {
@@ -1423,8 +1997,8 @@ void RuntimeProtection::monitor_system_integrity() {
             
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
+        }).detach();
     });
-    integrity_thread.detach();
 }
 
 void RuntimeProtection::validate_critical_computation(const std::vector<uint8_t>& input, const std::vector<uint8_t>& output) {
@@ -1467,10 +2041,10 @@ void RuntimeProtection::execute_operation(int operation_id) {
 }
 
 void RuntimeProtection::randomize_execution() {
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    std::mt19937 gen(static_cast<std::mt19937::result_type>(
+        secure_seed64_or_throw("runtime execution timing")));
     std::uniform_int_distribution<> timing_dis(1, 10);
-    
+
     std::this_thread::sleep_for(std::chrono::milliseconds(timing_dis(gen)));
     
     static bool shuffle_order = true;
@@ -1502,8 +2076,7 @@ void RuntimeProtection::add_dummy_operations() {
 
 void RuntimeProtection::shuffle_memory_access(void* ptr, size_t size) {
     uint8_t* memory = (uint8_t*)ptr;
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    std::mt19937_64 gen(secure_seed64_or_throw("runtime memory shuffle"));
     
     for (int i = 0; i < 64; i++) {
         size_t random_index = gen() % size;
@@ -1671,8 +2244,8 @@ bool CacheProtection::is_aes_ni_available() {
 void PowerMasking::add_consumption_noise() {
     // Ajouter du bruit aléatoire pour masquer la consommation
     volatile uint8_t noise_buffer[1024];
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    std::mt19937 gen(static_cast<std::mt19937::result_type>(
+        secure_seed64_or_throw("power masking noise")));
     std::uniform_int_distribution<> noise_dist(0, 255);
     
     for (int i = 0; i < 1024; i++) {
@@ -1688,11 +2261,8 @@ void PowerMasking::add_consumption_noise() {
 
 void PowerMasking::randomize_execution_timing() {
     // Randomiser le timing d'exécution pour contrer les attaques temporelles
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> delay_dist(0, 50); // 0-50 microsecondes
-    
-    std::this_thread::sleep_for(std::chrono::microseconds(delay_dist(gen)));
+    const auto delay_us = secure_uniform_or_throw<int>(0, 50, "power masking execution timing");
+    std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
 }
 
 void PowerMasking::balance_power_consumption() {
@@ -1720,12 +2290,8 @@ void PowerMasking::enable_power_masking() {
 
 void PowerMasking::apply_algorithmic_blinding() {
     // Appliquer un blindage algorithmique pour masquer les opérations cryptographiques
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> blind_dist(1, 1000);
-    
-    // Générer un facteur de blindage
-    uint64_t blind_factor = blind_dist(gen);
+    const uint64_t blind_factor =
+        secure_uniform_or_throw<uint64_t>(1, 1000, "power masking blinding factor");
     
     // Opérations avec blindage
     volatile uint64_t blinded_result = 0;
@@ -1760,3 +2326,5 @@ bool PowerMasking::detect_power_analysis() {
 }
 
 } // namespace hesia
+
+

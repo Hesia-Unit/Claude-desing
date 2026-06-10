@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <mutex>
 #include <cstdint>
 #include "state_drone.hpp"
 #include "protocole.hpp"
@@ -47,12 +48,19 @@ private:
     std::unique_ptr<VideoChannel> video_channel;
     std::vector<uint8_t> encrypted_msg;
     uint64_t seq;
+    // Protège l'état de chaînage des messages sécurisés (last_block_hash, seq)
+    // contre les émissions concurrentes (ping / télémétrie / données de vol).
+    std::mutex secure_message_mutex_;
     
     std::vector<uint8_t> derive_video_key(const std::vector<uint8_t>& session_key);
     std::vector<uint8_t> compute_firmware_sha3_512();
+    std::vector<uint8_t> sign_with_drone_identity(const std::vector<uint8_t>& payload);
+    std::filesystem::path sealed_dilithium_path_;
+    bool tee_anchored_dilithium_ = false;
     
 public:
     HesiaDrone(const std::string& did = "DRONE_001");
+    ~HesiaDrone();
     
     // HELLO
     Hello build_hello();
@@ -71,6 +79,7 @@ public:
     
     // CONFIRMATION
     std::vector<uint8_t> build_confirm();
+    void finalize_confirm_ok(const std::vector<uint8_t>& response);
     
     // Messages sécurisés
     std::vector<uint8_t> send_secure_message(const std::string& msg_type, const std::string& json_data);

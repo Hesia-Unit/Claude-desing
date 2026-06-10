@@ -20,7 +20,7 @@ namespace hesia {
         static inline std::filesystem::path BB_DIR = BASE_DIR / "blackbox";
         
         // Vidéo
-        static inline std::string VIDEO_PATH = "videos/DRONE2.mp4";
+        static inline std::string VIDEO_PATH = "";
         
         // Configuration threads
         static inline bool PIN_IA_THREADS = true;
@@ -43,6 +43,10 @@ namespace hesia {
             }
             if (MIDAS_ENGINE.is_relative()) {
                 MIDAS_ENGINE = BASE_DIR / MIDAS_ENGINE;
+            }
+            if (const char* video_env = std::getenv("HESIA_VIDEO_SOURCE");
+                video_env && video_env[0] != '\0') {
+                VIDEO_PATH = video_env;
             }
             BB_DIR = BASE_DIR / "blackbox";
 

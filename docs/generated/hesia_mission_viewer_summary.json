@@ -1,0 +1,117 @@
+{
+  "policy": "model",
+  "frames": 12,
+  "checkpoint": "artifacts\\mission_train_smoke.pt",
+  "video": "C:\\Users\\matis\\Documents\\Hesia-Firmware\\docs\\generated\\hesia_mission_viewer.mp4",
+  "contact_sheet": "C:\\Users\\matis\\Documents\\Hesia-Firmware\\docs\\generated\\hesia_mission_viewer_contact_sheet.jpg",
+  "summary": [
+    {
+      "frame": 0.0,
+      "reward": -0.30882069388555833,
+      "stage": 0.0,
+      "battery": 0.9981460000514984,
+      "mission_progress": 0.0,
+      "distance_to_stage_target": 1.6002005281567109,
+      "success": 0.0
+    },
+    {
+      "frame": 1.0,
+      "reward": -0.4272154749985785,
+      "stage": 0.0,
+      "battery": 0.9970809036009479,
+      "mission_progress": 0.0,
+      "distance_to_stage_target": 1.603209121990949,
+      "success": 0.0
+    },
+    {
+      "frame": 2.0,
+      "reward": -0.4280153430402279,
+      "stage": 0.0,
+      "battery": 0.9960078356195706,
+      "mission_progress": 0.0,
+      "distance_to_stage_target": 1.6090515092015267,
+      "success": 0.0
+    },
+    {
+      "frame": 3.0,
+      "reward": -0.42921873157471424,
+      "stage": 0.0,
+      "battery": 0.994926517996611,
+      "mission_progress": 0.0,
+      "distance_to_stage_target": 1.6176334325224162,
+      "success": 0.0
+    },
+    {
+      "frame": 4.0,
+      "reward": -0.43080672086775307,
+      "stage": 0.0,
+      "battery": 0.99383699986157,
+      "mission_progress": 0.0,
+      "distance_to_stage_target": 1.6288905315101148,
+      "success": 0.0
+    },
+    {
+      "frame": 5.0,
+      "reward": -0.4327689220905304,
+      "stage": 0.0,
+      "battery": 0.992739410764398,
+      "mission_progress": 0.0,
+      "distance_to_stage_target": 1.6427608191967011,
+      "success": 0.0
+    },
+    {
+      "frame": 6.0,
+      "reward": -0.4350962403565645,
+      "stage": 0.0,
+      "battery": 0.9916338770453351,
+      "mission_progress": 0.0,
+      "distance_to_stage_target": 1.6591839514672757,
+      "success": 0.0
+    },
+    {
+      "frame": 7.0,
+      "reward": -0.43777993255853653,
+      "stage": 0.0,
+      "battery": 0.9905205215875523,
+      "mission_progress": 0.0,
+      "distance_to_stage_target": 1.6781010538339616,
+      "success": 0.0
+    },
+    {
+      "frame": 8.0,
+      "reward": -0.4408122178316117,
+      "stage": 0.0,
+      "battery": 0.9893994673658626,
+      "mission_progress": 0.0,
+      "distance_to_stage_target": 1.6994546115398408,
+      "success": 0.0
+    },
+    {
+      "frame": 9.0,
+      "reward": -0.44418430873751646,
+      "stage": 0.0,
+      "battery": 0.9882708313245789,
+      "mission_progress": 0.0,
+      "distance_to_stage_target": 1.7231884136795999,
+      "success": 0.0
+    },
+    {
+      "frame": 10.0,
+      "reward": -0.44788834565877916,
+      "stage": 0.0,
+      "battery": 0.9871347278465049,
+      "mission_progress": 0.0,
+      "distance_to_stage_target": 1.7492475122213365,
+      "success": 0.0
+    },
+    {
+      "frame": 11.0,
+      "reward": -0.45191659832000736,
+      "stage": 0.0,
+      "battery": 0.9859912698898928,
+      "mission_progress": 0.0,
+      "distance_to_stage_target": 1.7775781810283662,
+      "success": 0.0
+    }
+  ]
+}

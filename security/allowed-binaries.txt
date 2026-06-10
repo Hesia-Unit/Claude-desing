@@ -1,2 +1,0 @@
-server_source/keys/demo_public.bin
-server_source/keys/drone_public.bin
